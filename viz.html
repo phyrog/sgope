@@ -1,0 +1,867 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>sgope</title>
+        <script src="https://d3js.org/d3.v7.min.js"></script>
+        <style>
+            body {
+                margin: 0;
+                padding: 20px;
+                font-family: Arial, sans-serif;
+                background: #1a1a1a;
+                color: #fff;
+                overflow: hidden;
+            }
+            #graph {
+                border: 1px solid #444;
+                background: #222;
+                width: 100%;
+                height: calc(100vh - 150px);
+            }
+            .controls {
+                margin-bottom: 20px;
+                padding: 15px;
+                background: #2a2a2a;
+                border-radius: 5px;
+                display: flex;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 15px;
+            }
+            .node {
+                cursor: pointer;
+                stroke: #fff7;
+                stroke-width: 1.5px;
+                transition: opacity 0.2s;
+                vector-effect: non-sclaing-stroke;
+            }
+            .node.selected {
+                stroke: #fff;
+                stroke-width: 2px;
+                filter: drop-shadow(0 0 4px #fff);
+            }
+            .link {
+                stroke: #fff;
+                stroke-opacity: 0.2;
+                fill: none;
+                pointer-events: none;
+                vector-effect: non-scaling-stroke;
+            }
+            .link.cross-package {
+                stroke-opacity: 0.15;
+                stroke-dasharray: 4, 4;
+            }
+            .node-label {
+                font-size: 10px;
+                pointer-events: none;
+                fill: #fff;
+            }
+            .legend {
+                position: fixed;
+                right: 20px;
+                top: 160px;
+                background: #2a2a2a;
+                padding: 15px;
+                border-radius: 5px;
+                border: 1px solid #444;
+            }
+            .legend-item {
+                margin: 5px 0;
+                display: flex;
+                align-items: center;
+                font-size: 12px;
+                cursor: pointer;
+                transition: opacity 0.2s;
+            }
+            .legend-item.inactive {
+                opacity: 0.3;
+            }
+            .legend-color {
+                width: 12px;
+                height: 12px;
+                margin-right: 10px;
+                border-radius: 50%;
+            }
+            .info {
+                position: fixed;
+                left: 20px;
+                top: 160px;
+                background: #2a2a2a;
+                padding: 15px;
+                border-radius: 5px;
+                border: 1px solid #444;
+                width: 280px;
+                max-height: 70vh;
+                display: flex;
+                flex-direction: column;
+            }
+            .sidebar-scroll {
+                flex-grow: 1;
+                overflow-y: auto;
+                padding-right: 5px;
+            }
+            .sidebar-list {
+                list-style: none;
+                padding: 0;
+                margin: 10px 0;
+            }
+            .sidebar-list li {
+                padding: 4px 8px;
+                margin: 2px 0;
+                background: #333;
+                border-radius: 3px;
+                font-size: 11px;
+                cursor: pointer;
+                border-left: 3px solid transparent;
+            }
+            .sidebar-list li:hover {
+                background: #444;
+            }
+            .li-outgoing {
+                border-left-color: #4ecdc4 !important;
+            }
+            .li-incoming {
+                border-left-color: #ff6b6b !important;
+            }
+            .li-search {
+                border-left-color: #fff !important;
+            }
+            .li-selected {
+                border-left-color: #ffd700 !important;
+                background: #3d3d29 !important;
+            }
+            .muted {
+                opacity: 0.2 !important;
+            }
+            .highlight-out {
+                stroke: #4ecdc4 !important;
+                stroke-width: 1px !important;
+            }
+            .highlight-in {
+                stroke: #ff6b6b !important;
+                stroke-width: 1px !important;
+            }
+            .highlight-internal {
+                stroke: #ffffff !important;
+                stroke-width: 1px !important;
+            }
+            button {
+                background: #444;
+                color: white;
+                border: 1px solid #666;
+                padding: 5px 10px;
+                cursor: pointer;
+                border-radius: 3px;
+            }
+            button:hover {
+                background: #555;
+            }
+            #search-box {
+                width: 100%;
+                padding: 8px;
+                background: #333;
+                border: 1px solid #555;
+                color: #fff;
+                border-radius: 3px;
+                margin-bottom: 10px;
+                box-sizing: border-box;
+            }
+            #search-results {
+                max-height: 240px;
+                overflow-y: auto;
+                border-bottom: 1px solid #444;
+                margin-bottom: 10px;
+                flex-shrink: 0;
+            }
+            #node-info {
+                flex-shrink: 3;
+            }
+            .section-header {
+                font-size: 12px;
+                color: #aaa;
+                text-transform: uppercase;
+                margin-top: 15px;
+                display: block;
+                border-bottom: 1px solid #444;
+            }
+            .pkg-badge {
+                font-size: 9px;
+                background: #444;
+                padding: 2px 4px;
+                border-radius: 2px;
+                margin-left: 4px;
+                color: #aaa;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="controls">
+            <h3 style="margin: 0">sgope</h3>
+            <label
+                ><input type="checkbox" id="show-labels" checked />
+                Labels</label
+            >
+            <label
+                >Dist:
+                <input
+                    type="range"
+                    id="link-distance"
+                    min="30"
+                    max="400"
+                    value="150"
+            /></label>
+            <label
+                >Charge:
+                <input
+                    type="range"
+                    id="charge"
+                    min="-1200"
+                    max="-50"
+                    value="-400"
+            /></label>
+            <label
+                >Cluster Strength:
+                <input
+                    type="range"
+                    id="cluster-strength"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value="0.3"
+            /></label>
+            <button id="fit-selection">Fit Selection</button>
+            <button id="reset-focus">Reset Focus</button>
+            <p>Nodes: <span id="node-count"></span></p>
+        </div>
+
+        <div class="legend">
+            <div class="legend-item" data-group="test">
+                <div class="legend-color"></div>
+                Tests
+            </div>
+            <div class="legend-item" data-group="type">
+                <div class="legend-color"></div>
+                Types
+            </div>
+            <div class="legend-item" data-group="method">
+                <div class="legend-color"></div>
+                Methods
+            </div>
+            <div class="legend-item" data-group="func">
+                <div class="legend-color"></div>
+                Functions
+            </div>
+            <div class="legend-item" data-group="const">
+                <div class="legend-color"></div>
+                Constants
+            </div>
+            <div class="legend-item" data-group="var">
+                <div class="legend-color"></div>
+                Variables
+            </div>
+        </div>
+
+        <div class="info">
+            <input type="text" id="search-box" placeholder="Search nodes..." />
+            <div id="search-results"></div>
+            <div class="sidebar-scroll" id="node-info">
+                <i>Click a node to see details</i>
+            </div>
+        </div>
+
+        <svg id="graph"></svg>
+
+        <script>
+            const data = DATA_PLACEHOLDER;
+
+            data.nodes.forEach((n) => {
+                n.group =
+                    n.kind === "func" && n.type === "method"
+                        ? "method"
+                        : n.kind;
+                if (n.pkg.endsWith(".test") || n.pkg.endsWith("_test")) {
+                    n.group = "test";
+                }
+                n.package = n.pkg;
+            });
+            data.links.forEach((l) => {
+                l.source = l.from;
+                l.target = l.to;
+                const sPkg = data.nodes.find((n) => n.id === l.from)?.pkg;
+                const tPkg = data.nodes.find((n) => n.id === l.to)?.pkg;
+                l.crossPackage = sPkg !== tPkg;
+            });
+
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            let selectedNodeIds = new Set();
+            let activeGroups = new Set(["type", "method", "func"]);
+
+            const svg = d3.select("#graph").on("click", (e) => {
+                if (e.target.tagName === "svg") resetFocus();
+            });
+            const g = svg.append("g");
+            const defs = svg.append("defs");
+
+            const createMarker = (id, color) => {
+                defs.append("marker")
+                    .attr("id", id)
+                    .attr("viewBox", "0 -5 10 10")
+                    .attr("refX", 5)
+                    .attr("refY", 0)
+                    .attr("markerWidth", 6)
+                    .attr("markerHeight", 6)
+                    .attr("orient", "auto")
+                    .append("path")
+                    .attr("d", "M0,-5L10,0L0,5")
+                    .attr("fill", color);
+            };
+            createMarker("arrow-default", "#999");
+            createMarker("arrow-outgoing", "#4ecdc4");
+            createMarker("arrow-incoming", "#ff6b6b");
+            createMarker("arrow-internal", "#ffffff");
+
+            const zoom = d3
+                .zoom()
+                .scaleExtent([0.01, 4])
+                .on("zoom", (e) => {
+                    const { k } = e.transform;
+                    g.attr("transform", e.transform);
+
+                    d3.selectAll(".link").style(
+                        "stroke-opacity",
+                        Math.max(0.05, k * 0.2),
+                    );
+                    d3.selectAll(".highlight-internal").style(
+                        "stroke-opacity",
+                        Math.max(0.1, k * 0.6),
+                    );
+                    d3.selectAll(".highlight-in, .highlight-out").style(
+                        "stroke-opacity",
+                        Math.max(0.2, k * 0.8),
+                    );
+                });
+            svg.call(zoom);
+
+            const color = d3.scaleOrdinal(d3.schemeSet3);
+
+            d3.selectAll(".legend-item").each(function (d) {
+                const colorKey = d3.select(this).attr("data-group");
+                d3.select(this)
+                    .select(".legend-color")
+                    .style("background", color(colorKey));
+            });
+
+            let simulation, link, node, label, midArrow;
+
+            function updateGraph() {
+                const filteredNodes = data.nodes.filter((n) =>
+                    activeGroups.has(n.group),
+                );
+                const nodeIds = new Set(filteredNodes.map((n) => n.id));
+                const filteredLinks = data.links.filter(
+                    (l) => nodeIds.has(l.source) && nodeIds.has(l.target),
+                );
+
+                const nodeCount = document.getElementById("node-count");
+                nodeCount.innerHTML = nodeIds.size;
+
+                g.selectAll("*").remove();
+
+                link = g
+                    .append("g")
+                    .selectAll("line")
+                    .data(filteredLinks)
+                    .join("line")
+                    .attr("class", (d) =>
+                        d.crossPackage ? "link cross-package" : "link",
+                    );
+
+                midArrow = g
+                    .append("g")
+                    .selectAll("path")
+                    .data(filteredLinks)
+                    .join("path")
+                    .attr("class", "mid-arrow")
+                    .attr("marker-end", "url(#arrow-default)");
+
+                node = g
+                    .append("g")
+                    .selectAll("circle")
+                    .data(filteredNodes)
+                    .join("circle")
+                    .attr("class", "node")
+                    .attr("r", (d) => (d.group === "test" ? 6 : 10))
+                    .attr("fill", (d) => color(d.group) || "#999")
+                    .call(
+                        d3
+                            .drag()
+                            .on("start", dragstarted)
+                            .on("drag", dragged)
+                            .on("end", dragended),
+                    )
+                    .on("click", (e, d) => {
+                        e.stopPropagation();
+                        handleSelectionLogic(d.id, e.shiftKey);
+                    });
+
+                label = g
+                    .append("g")
+                    .selectAll("text")
+                    .data(filteredNodes)
+                    .join("text")
+                    .attr("class", "node-label")
+                    .attr("dx", 14)
+                    .attr("dy", 4)
+                    .text((d) => d.name)
+                    .style(
+                        "display",
+                        document.getElementById("show-labels").checked
+                            ? "block"
+                            : "none",
+                    );
+
+                if (simulation) simulation.stop();
+                simulation = d3
+                    .forceSimulation(filteredNodes)
+                    .force(
+                        "link",
+                        d3
+                            .forceLink(filteredLinks)
+                            .id((d) => d.id)
+                            .distance((d) =>
+                                d.crossPackage
+                                    ? 300
+                                    : +document.getElementById("link-distance")
+                                          .value,
+                            )
+                            .strength((d) => (d.crossPackage ? 0.05 : 0.4)),
+                    )
+                    .force(
+                        "charge",
+                        d3
+                            .forceManyBody()
+                            .strength(+document.getElementById("charge").value),
+                    )
+                    .force("center", d3.forceCenter(width / 2, height / 2))
+                    .force("collision", d3.forceCollide().radius(25));
+
+                simulation.on("tick", () => {
+                    const rawStrength =
+                        +document.getElementById("cluster-strength").value;
+                    const strength = rawStrength * 0.05 * simulation.alpha();
+
+                    if (strength > 0) {
+                        const centroids = new Map();
+                        filteredNodes.forEach((d) => {
+                            if (!centroids.has(d.pkg))
+                                centroids.set(d.pkg, { x: 0, y: 0, count: 0 });
+                            const c = centroids.get(d.pkg);
+                            c.x += d.x;
+                            c.y += d.y;
+                            c.count++;
+                        });
+                        centroids.forEach((c) => {
+                            c.x /= c.count;
+                            c.y /= c.count;
+                        });
+
+                        filteredNodes.forEach((d) => {
+                            const c = centroids.get(d.pkg);
+                            // Attraction
+                            d.vx += (c.x - d.x) * strength;
+                            d.vy += (c.y - d.y) * strength;
+
+                            // Repulsion from other cluster centers
+                            centroids.forEach((otherC, pkg) => {
+                                if (pkg === d.pkg) return;
+                                const dx = d.x - otherC.x,
+                                    dy = d.y - otherC.y;
+                                const distSq = dx * dx + dy * dy || 1;
+                                // Softer repulsion that also cools with alpha
+                                const force =
+                                    (rawStrength * 30 * simulation.alpha()) /
+                                    distSq;
+                                d.vx += dx * force;
+                                d.vy += dy * force;
+                            });
+                        });
+                    }
+
+                    link.attr("x1", (d) => d.source.x)
+                        .attr("y1", (d) => d.source.y)
+                        .attr("x2", (d) => d.target.x)
+                        .attr("y2", (d) => d.target.y);
+                    midArrow.attr("d", (d) => {
+                        const midX = (d.source.x + d.target.x) / 2,
+                            midY = (d.source.y + d.target.y) / 2;
+                        const angle = Math.atan2(
+                            d.target.y - d.source.y,
+                            d.target.x - d.source.x,
+                        );
+                        return `M${midX},${midY} L${midX + Math.cos(angle)},${midY + Math.sin(angle)}`;
+                    });
+                    node.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
+                    label.attr("x", (d) => d.x).attr("y", (d) => d.y);
+                });
+                if (selectedNodeIds.size > 0) applyFocus();
+            }
+
+            function handleSelectionLogic(id, isShift) {
+                const newSelections = new Set();
+                const targetNode = data.nodes.find((n) => n.id === id);
+                if (targetNode && targetNode.kind === "type") {
+                    newSelections.add(id);
+                    data.nodes.forEach((n) => {
+                        if (
+                            n.group === "method" &&
+                            n.name.startsWith(targetNode.name + ".")
+                        )
+                            newSelections.add(n.id);
+                    });
+                } else {
+                    newSelections.add(id);
+                }
+                if (isShift) {
+                    newSelections.forEach((sid) => {
+                        if (selectedNodeIds.has(sid))
+                            selectedNodeIds.delete(sid);
+                        else selectedNodeIds.add(sid);
+                    });
+                } else {
+                    selectedNodeIds.clear();
+                    newSelections.forEach((sid) => selectedNodeIds.add(sid));
+                }
+                if (selectedNodeIds.size === 0) resetFocus();
+                else applyFocus();
+                updateURL();
+            }
+
+            function applyFocus() {
+                const connectedNodes = new Set(selectedNodeIds);
+                const extOut = data.links.filter(
+                    (l) =>
+                        selectedNodeIds.has(l.source.id || l.source) &&
+                        !selectedNodeIds.has(l.target.id || l.target),
+                );
+                const extIn = data.links.filter(
+                    (l) =>
+                        !selectedNodeIds.has(l.source.id || l.source) &&
+                        selectedNodeIds.has(l.target.id || l.target),
+                );
+
+                extOut.forEach((l) =>
+                    connectedNodes.add(l.target.id || l.target),
+                );
+                extIn.forEach((l) =>
+                    connectedNodes.add(l.source.id || l.source),
+                );
+
+                node.classed("muted", (d) => !connectedNodes.has(d.id)).classed(
+                    "selected",
+                    (d) => selectedNodeIds.has(d.id),
+                );
+                label.classed("muted", (d) => !connectedNodes.has(d.id));
+                link.classed("muted", true)
+                    .classed("highlight-out", false)
+                    .classed("highlight-in", false)
+                    .classed("highlight-internal", false);
+                midArrow
+                    .classed("muted", true)
+                    .attr("marker-end", "url(#arrow-default)");
+
+                link.filter(
+                    (l) =>
+                        selectedNodeIds.has(l.source.id || l.source) &&
+                        !selectedNodeIds.has(l.target.id || l.target),
+                )
+                    .classed("muted", false)
+                    .classed("highlight-out", true);
+                midArrow
+                    .filter(
+                        (l) =>
+                            selectedNodeIds.has(l.source.id || l.source) &&
+                            !selectedNodeIds.has(l.target.id || l.target),
+                    )
+                    .classed("muted", false)
+                    .attr("marker-end", "url(#arrow-outgoing)");
+                link.filter(
+                    (l) =>
+                        !selectedNodeIds.has(l.source.id || l.source) &&
+                        selectedNodeIds.has(l.target.id || l.target),
+                )
+                    .classed("muted", false)
+                    .classed("highlight-in", true);
+                midArrow
+                    .filter(
+                        (l) =>
+                            !selectedNodeIds.has(l.source.id || l.source) &&
+                            selectedNodeIds.has(l.target.id || l.target),
+                    )
+                    .classed("muted", false)
+                    .attr("marker-end", "url(#arrow-incoming)");
+                link.filter(
+                    (l) =>
+                        selectedNodeIds.has(l.source.id || l.source) &&
+                        selectedNodeIds.has(l.target.id || l.target),
+                )
+                    .classed("muted", false)
+                    .classed("highlight-internal", true);
+                midArrow
+                    .filter(
+                        (l) =>
+                            selectedNodeIds.has(l.source.id || l.source) &&
+                            selectedNodeIds.has(l.target.id || l.target),
+                    )
+                    .classed("muted", false)
+                    .attr("marker-end", "url(#arrow-internal)");
+
+                updateSidebar(extIn, extOut);
+            }
+
+            function resetFocus() {
+                selectedNodeIds.clear();
+                node.classed("muted", false).classed("selected", false);
+                label.classed("muted", false);
+                link.classed("muted", false)
+                    .classed("highlight-out", false)
+                    .classed("highlight-in", false)
+                    .classed("highlight-internal", false);
+                midArrow
+                    .classed("muted", false)
+                    .attr("marker-end", "url(#arrow-default)");
+                document.getElementById("node-info").innerHTML =
+                    "<i>Click a node to see details</i>";
+                document.getElementById("search-box").value = "";
+                document.getElementById("search-results").innerHTML = "";
+                updateURL();
+            }
+
+            function updateSidebar(incoming, outgoing) {
+                const info = document.getElementById("node-info");
+                let html = "<h3>Focus Mode</h3>";
+                const getSortedIds = (links, key) =>
+                    Array.from(
+                        new Set(
+                            links.map((l) =>
+                                typeof l[key] === "object" ? l[key].id : l[key],
+                            ),
+                        ),
+                    ).sort();
+                const outIds = getSortedIds(outgoing, "target"),
+                    inIds = getSortedIds(incoming, "source"),
+                    selIds = Array.from(selectedNodeIds).sort();
+                const getDisplayName = (id) => {
+                    const n = data.nodes.find((x) => x.id === id);
+                    return n ? n.name : id;
+                };
+                const getPackageBadge = (id) => {
+                    const n = data.nodes.find((x) => x.id === id);
+                    return n
+                        ? `<span class="pkg-badge">${n.pkg.split("/").pop()}</span>`
+                        : "";
+                };
+                html +=
+                    "<span class='section-header'>Selected</span><ul class='sidebar-list'>";
+                selIds.forEach(
+                    (id) =>
+                        (html += `<li class='li-selected' onclick="handleSelectionLogic('${id}', event.shiftKey)">${getDisplayName(id)}${getPackageBadge(id)}</li>`),
+                );
+                html += `</ul><span class='section-header'>Outgoing (${outIds.length})</span><ul class='sidebar-list'>`;
+                outIds.forEach(
+                    (id) =>
+                        (html += `<li class='li-outgoing' onclick="handleSelectionLogic('${id}', event.shiftKey)">${getDisplayName(id)}${getPackageBadge(id)}</li>`),
+                );
+                html += `</ul><span class='section-header'>Incoming (${inIds.length})</span><ul class='sidebar-list'>`;
+                inIds.forEach(
+                    (id) =>
+                        (html += `<li class='li-incoming' onclick="handleSelectionLogic('${id}', event.shiftKey)">${getDisplayName(id)}${getPackageBadge(id)}</li>`),
+                );
+                info.innerHTML = html + "</ul>";
+            }
+
+            document
+                .querySelectorAll(".legend-item[data-group]")
+                .forEach((item) => {
+                    item.addEventListener("click", () => {
+                        const group = item.getAttribute("data-group");
+                        if (activeGroups.has(group)) {
+                            activeGroups.delete(group);
+                            item.classList.add("inactive");
+                        } else {
+                            activeGroups.add(group);
+                            item.classList.remove("inactive");
+                        }
+                        updateGraph();
+                        updateURL();
+                    });
+                });
+
+            document
+                .getElementById("search-box")
+                .addEventListener("input", (e) => {
+                    const term = e.target.value.toLowerCase();
+                    const resultsDiv =
+                        document.getElementById("search-results");
+                    if (term.length < 1) {
+                        resultsDiv.innerHTML = "";
+                        return;
+                    }
+                    const matches = data.nodes.filter((n) =>
+                        n.name.toLowerCase().includes(term),
+                    );
+                    let html = "<ul class='sidebar-list'>";
+                    matches.forEach(
+                        (m) =>
+                            (html += `<li class='li-search' onclick="handleSelectionLogic('${m.id}', event.shiftKey)">${m.name}<span class="pkg-badge">${m.pkg.split("/").pop()}</span></li>`),
+                    );
+                    resultsDiv.innerHTML = html + "</ul>";
+                });
+
+            function dragstarted(event) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                event.subject.fx = event.subject.x;
+                event.subject.fy = event.subject.y;
+            }
+            function dragged(event) {
+                event.subject.fx = event.x;
+                event.subject.fy = event.y;
+            }
+            function dragended(event) {
+                if (!event.active) simulation.alphaTarget(0);
+                event.subject.fx = null;
+                event.subject.fy = null;
+            }
+
+            function fitSelection() {
+                if (selectedNodeIds.size === 0) return;
+                const selectedNodes = data.nodes.filter((n) =>
+                    selectedNodeIds.has(n.id),
+                );
+                let minX = Infinity,
+                    minY = Infinity,
+                    maxX = -Infinity,
+                    maxY = -Infinity;
+                selectedNodes.forEach((n) => {
+                    if (n.x < minX) minX = n.x;
+                    if (n.y < minY) minY = n.y;
+                    if (n.x > maxX) maxX = n.x;
+                    if (n.y > maxY) maxY = n.y;
+                });
+                const padding = 100,
+                    selectionWidth = maxX - minX,
+                    selectionHeight = maxY - minY;
+                const scale = Math.min(
+                    width / (selectionWidth || 1),
+                    height / (selectionHeight || 1),
+                    2,
+                );
+                const centerX = (minX + maxX) / 2,
+                    centerY = (minY + maxY) / 2;
+                svg.transition()
+                    .duration(750)
+                    .call(
+                        zoom.transform,
+                        d3.zoomIdentity
+                            .translate(
+                                width / 2 - scale * centerX,
+                                height / 2 - scale * centerY,
+                            )
+                            .scale(scale),
+                    );
+            }
+
+            document
+                .getElementById("show-labels")
+                .addEventListener("change", (e) => {
+                    label.style("display", e.target.checked ? "block" : "none");
+                    updateURL();
+                });
+            document
+                .getElementById("link-distance")
+                .addEventListener("input", (e) => {
+                    simulation.force("link").distance(e.target.value);
+                    simulation.alpha(0.3).restart();
+                    updateURL();
+                });
+            document.getElementById("charge").addEventListener("input", (e) => {
+                simulation.force("charge").strength(+e.target.value);
+                simulation.alpha(0.3).restart();
+                updateURL();
+            });
+            document
+                .getElementById("cluster-strength")
+                .addEventListener("input", () => {
+                    simulation.alpha(0.3).restart();
+                    updateURL();
+                });
+            document
+                .getElementById("fit-selection")
+                .addEventListener("click", fitSelection);
+            document
+                .getElementById("reset-focus")
+                .addEventListener("click", resetFocus);
+
+            function updateURL() {
+                const params = new URLSearchParams();
+                if (selectedNodeIds.size > 0)
+                    params.set("sel", Array.from(selectedNodeIds).join(","));
+                params.set("groups", Array.from(activeGroups).join(","));
+                params.set(
+                    "labels",
+                    document.getElementById("show-labels").checked,
+                );
+                params.set(
+                    "dist",
+                    document.getElementById("link-distance").value,
+                );
+                params.set("charge", document.getElementById("charge").value);
+                params.set(
+                    "cluster",
+                    document.getElementById("cluster-strength").value,
+                );
+                window.history.pushState(null, "", "#" + params.toString());
+            }
+
+            function loadFromURL() {
+                const hash = window.location.hash.substring(1);
+                if (!hash) return;
+                const params = new URLSearchParams(hash);
+                if (params.has("sel"))
+                    selectedNodeIds = new Set(params.get("sel").split(","));
+                if (params.has("groups")) {
+                    activeGroups = new Set(params.get("groups").split(","));
+                    document
+                        .querySelectorAll(".legend-item[data-group]")
+                        .forEach((i) =>
+                            i.classList.toggle(
+                                "inactive",
+                                !activeGroups.has(i.getAttribute("data-group")),
+                            ),
+                        );
+                }
+                if (params.has("labels"))
+                    document.getElementById("show-labels").checked =
+                        params.get("labels") === "true";
+                if (params.has("dist"))
+                    document.getElementById("link-distance").value =
+                        params.get("dist");
+                if (params.has("charge"))
+                    document.getElementById("charge").value =
+                        params.get("charge");
+                if (params.has("cluster"))
+                    document.getElementById("cluster-strength").value =
+                        params.get("cluster");
+            }
+
+            loadFromURL();
+            updateGraph();
+            window.handleSelectionLogic = handleSelectionLogic;
+            window.onhashchange = () => {
+                loadFromURL();
+                updateGraph();
+            };
+        </script>
+    </body>
+</html>

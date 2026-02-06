@@ -1,334 +1,254 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
-	"log"
-	"strings"
+	"go/types"
+
+	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/go/packages"
 )
 
+const (
+	kindType  = "type"
+	kindFunc  = "func"
+	kindConst = "const"
+	kindVar   = "var"
+
+	typeStruct    = "struct"
+	typeInterface = "interface"
+	typeBasic     = "basic"
+	typeFunc      = "func"
+
+	funcMethod = "method"
+	funcBasic  = "func"
+)
+
+type Graph struct {
+	Nodes map[string]*Node `json:"nodes"`
+	Links []Link           `json:"links"`
+}
+
+func (g *Graph) findContainingNode(pkg *packages.Package, file *ast.File, n ast.Node) *Node {
+	if n == nil {
+		return nil
+	}
+	path, _ := astutil.PathEnclosingInterval(file, n.Pos(), n.End())
+
+	for _, node := range path {
+		var obj types.Object
+
+		switch decl := node.(type) {
+		case *ast.FuncDecl:
+			obj = pkg.TypesInfo.Defs[decl.Name]
+		case *ast.TypeSpec:
+			obj = pkg.TypesInfo.Defs[decl.Name]
+		case *ast.ValueSpec:
+			if len(decl.Names) > 0 {
+				obj = pkg.TypesInfo.Defs[decl.Names[0]]
+			}
+		}
+
+		if obj != nil {
+			return g.Nodes[id(obj)]
+		}
+	}
+
+	return nil
+}
+
+func (g *Graph) MarshalJSON() ([]byte, error) {
+	var out struct {
+		Graph
+		Nodes []*Node `json:"nodes"`
+	}
+
+	out.Links = g.Links
+
+	for _, node := range g.Nodes {
+		out.Nodes = append(out.Nodes, node)
+	}
+
+	return json.Marshal(out)
+}
+
 type Node struct {
-	ID    string `json:"id"`
-	Type  string `json:"type"`
-	Group string `json:"group"`
+	Kind      string `json:"kind"`
+	Type      string `json:"type,omitempty"`
+	Pkg       string `json:"pkg"`
+	Id        string `json:"id"`
+	LocalName string `json:"name"`
+	obj       types.Object
+	pkg       *packages.Package
 }
 
 type Link struct {
-	Source string `json:"source"`
-	Target string `json:"target"`
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
-type GraphData struct {
-	Nodes []Node `json:"nodes"`
-	Links []Link `json:"links"`
-}
-
-// Internal representation for the analyzer
-type DepNode struct {
-	name     string
-	kind     string // "type", "func", "method"
-	callsTo  map[string]bool
-	readsTo  map[string]bool
-	embedsTo map[string]bool
-}
-
-type DepGraph struct {
-	nodes map[string]*DepNode
-}
-
-func analyze(pkgPath string) *DepGraph {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, pkgPath, nil, 0)
+func analyzePackages(paths ...string) (*Graph, error) {
+	cfg := &packages.Config{
+		// Tests: true,
+		Mode: packages.NeedName | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+	}
+	pkgs, err := packages.Load(cfg, paths...)
 	if err != nil {
-		log.Fatalf("Analysis error: %v", err)
+		return nil, err
 	}
 
-	graph := &DepGraph{nodes: make(map[string]*DepNode)}
+	var graph Graph
+	graph.Nodes = make(map[string]*Node)
+
+	// Collect nodes
 	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			collectDeclarations(file, graph)
+		scope := pkg.Types.Scope()
+		for _, name := range scope.Names() {
+			obj := scope.Lookup(name)
+
+			for _, node := range objNodes(pkg, obj) {
+				graph.Nodes[node.Id] = &node
+			}
 		}
 	}
+
+	links := make(map[string]map[string]bool)
+
 	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			findDependencies(file, graph)
-		}
-	}
-	return graph
-}
-
-const (
-	kindType     = "type"
-	kindFunction = "func"
-	kindMethod   = "method"
-	kindVar      = "var"
-	kindConst    = "const"
-	kindUnknown  = "unknown"
-)
-
-func collectDeclarations(file *ast.File, graph *DepGraph) {
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.FuncDecl:
-			name := getFuncName(node)
-			kind := kindFunction
-			if node.Recv != nil {
-				kind = kindMethod
-			}
-			graph.getOrCreate(name, kind)
-			return false
-		case *ast.GenDecl:
-			switch node.Tok {
-			case token.TYPE:
-				for _, spec := range node.Specs {
-					if ts, ok := spec.(*ast.TypeSpec); ok {
-						graph.getOrCreate(ts.Name.Name, kindType)
-					}
-				}
-			case token.VAR, token.CONST:
-				kind := kindVar
-				if node.Tok == token.CONST {
-					kind = kindConst
-				}
-				for _, spec := range node.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, name := range vs.Names {
-							if name.Name == "_" {
-								continue
-							}
-							graph.getOrCreate(name.Name, kind)
-						}
-					}
-				}
-			}
-		}
-		return true
-	})
-}
-
-func findDependencies(file *ast.File, graph *DepGraph) {
-	ast.Inspect(file, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.FuncDecl:
-			fromName := getFuncName(n)
-			fromNode := graph.nodes[fromName]
-			if fromNode == nil {
-				return true
-			}
-
-			findTypesInFunc(n.Type, fromNode, graph)
-
-			ast.Inspect(n.Body, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					callee := getCalleeName(call.Fun, graph)
-					if callee != "" && callee != fromName {
-						fromNode.callsTo[callee] = true
-					}
+		for _, file := range pkg.Syntax {
+			ast.Inspect(file, func(n ast.Node) bool {
+				parentNode := graph.findContainingNode(pkg, file, n)
+				if parentNode == nil {
+					return true
 				}
 
 				if ident, ok := n.(*ast.Ident); ok {
-					if target, exists := graph.nodes[ident.Name]; exists {
-						if target.kind == kindVar || target.kind == kindConst {
-							fromNode.readsTo[ident.Name] = true
+					if refObj := pkg.TypesInfo.Uses[ident]; refObj != nil {
+						if refEntity := graph.Nodes[id(refObj)]; refEntity != nil {
+							m := links[parentNode.Id]
+							if m == nil {
+								m = make(map[string]bool)
+								links[parentNode.Id] = m
+							}
+							m[refEntity.Id] = true
 						}
 					}
 				}
 				return true
 			})
-			ast.Inspect(n.Body, func(n ast.Node) bool {
-				switch node := n.(type) {
-				case *ast.SelectorExpr:
-					if ident, ok := node.X.(*ast.Ident); ok {
-						if graph.nodes[ident.Name] != nil && graph.nodes[ident.Name].kind == kindType {
-							fromNode.readsTo[ident.Name] = true
-						}
-					}
-				case *ast.CompositeLit:
-					typeName := getTypeName(node.Type)
-					if typeName != "" && graph.nodes[typeName] != nil {
-						fromNode.readsTo[typeName] = true
-					}
+		}
+	}
+
+	for _, node := range graph.Nodes {
+		if named, ok := node.obj.Type().(*types.Named); ok {
+			if iface, ok := named.Underlying().(*types.Interface); ok {
+				for method := range iface.ExplicitMethods() {
+					graph.Links = append(graph.Links, Link{From: id(method), To: node.Id})
 				}
-				return true
-			})
-		case *ast.GenDecl:
-			switch n.Tok {
-			case token.TYPE:
-				for _, spec := range n.Specs {
-					ts, ok := spec.(*ast.TypeSpec)
-					if !ok {
-						continue
-					}
-
-					structType, ok := ts.Type.(*ast.StructType)
-					if !ok {
-						continue
-					}
-
-					fromNode := graph.nodes[ts.Name.Name]
-					if fromNode == nil {
-						continue
-					}
-
-					for _, field := range structType.Fields.List {
-						typeName := getTypeName(field.Type)
-						if typeName != "" && graph.nodes[typeName] != nil {
-							if len(field.Names) == 0 {
-								// Embedded field
-								fromNode.embedsTo[typeName] = true
-							} else {
-								// Regular field
-								fromNode.readsTo[typeName] = true
-							}
-						}
-					}
-				}
-			case token.VAR, token.CONST:
-				for _, spec := range n.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, name := range vs.Names {
-							vNode, ok := graph.nodes[name.Name]
-							if !ok {
-								continue
-							}
-							// Var -> Type dependency
-							if vs.Type != nil {
-								typeName := getTypeName(vs.Type)
-								if _, ok := graph.nodes[typeName]; ok {
-									vNode.readsTo[typeName] = true
-								}
-							}
-							// Var -> Func dependency (Initializers)
-							for _, val := range vs.Values {
-								ast.Inspect(val, func(vn ast.Node) bool {
-									if call, ok := vn.(*ast.CallExpr); ok {
-										callee := getCalleeName(call.Fun, graph)
-										if callee != "" {
-											vNode.callsTo[callee] = true
-										}
-									}
-									return true
-								})
-							}
-						}
-					}
+				for embedded := range iface.EmbeddedTypes() {
+					graph.Links = append(graph.Links, Link{From: node.Id, To: embedded.String()})
 				}
 			}
-		}
-		return true
-	})
-}
-
-var bar = getFuncName(&ast.FuncDecl{Name: &ast.Ident{Name: "bar"}, Recv: &ast.FieldList{}})
-
-func getFuncName(funcDecl *ast.FuncDecl) string {
-	if funcDecl.Recv != nil && len(funcDecl.Recv.List) > 0 {
-		recvType := getTypeName(funcDecl.Recv.List[0].Type)
-		return recvType + "." + funcDecl.Name.Name
-	}
-	return funcDecl.Name.Name
-}
-
-func getTypeName(expr ast.Expr) string {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		return t.Name
-	case *ast.StarExpr:
-		return getTypeName(t.X)
-	case *ast.ArrayType:
-		return getTypeName(t.Elt)
-	case *ast.MapType:
-		return getTypeName(t.Value)
-	}
-	return ""
-}
-
-func getCalleeName(expr ast.Expr, graph *DepGraph) string {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		if graph.nodes[e.Name] != nil {
-			return e.Name
-		}
-	case *ast.SelectorExpr:
-		if ident, ok := e.X.(*ast.Ident); ok {
-			methodName := ident.Name + "." + e.Sel.Name
-			if graph.nodes[methodName] != nil {
-				return methodName
+			for method := range named.Methods() {
+				graph.Links = append(graph.Links, Link{From: id(method), To: node.Id})
 			}
 		}
 	}
-	return ""
+
+	for from, v := range links {
+		for to := range v {
+			graph.Links = append(graph.Links, Link{From: from, To: to})
+		}
+	}
+
+	return &graph, nil
 }
 
-func (g *DepGraph) getOrCreate(name, kind string) *DepNode {
-	if g.nodes[name] == nil {
-		g.nodes[name] = &DepNode{name: name, kind: kind, callsTo: make(map[string]bool), readsTo: make(map[string]bool), embedsTo: make(map[string]bool)}
-	}
-	return g.nodes[name]
-}
+func objNodes(pkg *packages.Package, obj types.Object) []Node {
+	switch t := obj.(type) {
+	case *types.Func:
+		return []Node{{obj: obj, pkg: pkg, Kind: kindFunc, Type: funcBasic, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()}}
+	case *types.TypeName:
+		var nodes []Node
 
-func (g *DepGraph) toString() string {
-	var sb strings.Builder
-	for _, node := range g.nodes {
-		fmt.Fprintf(&sb, "\n%s (%s):\n", node.name, node.kind)
-		for dep := range node.callsTo {
-			fmt.Fprintf(&sb, "  - %s\n", dep)
-		}
-		for dep := range node.readsTo {
-			fmt.Fprintf(&sb, "  - %s\n", dep)
-		}
-		for dep := range node.embedsTo {
-			fmt.Fprintf(&sb, "  - %s\n", dep)
-		}
-	}
-	return sb.String()
-}
+		switch u := t.Type().Underlying().(type) {
+		case *types.Struct:
+			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeStruct, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
+		case *types.Interface:
+			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeInterface, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
 
-func findTypesInFunc(fType *ast.FuncType, fromNode *DepNode, graph *DepGraph) {
-	if fType == nil {
-		return
-	}
-	// Check parameters
-	if fType.Params != nil {
-		for _, field := range fType.Params.List {
-			recordType(field.Type, fromNode, graph)
+			for method := range u.ExplicitMethods() {
+				nodes = append(nodes, Node{obj: method, pkg: pkg, Kind: kindFunc, Type: funcMethod, Id: id(method), LocalName: t.Name() + "." + method.Name(), Pkg: obj.Pkg().Path()})
+			}
+		case *types.Basic:
+			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeBasic, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
+		case *types.Signature:
+			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeFunc, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
 		}
-	}
-	// Check return values
-	if fType.Results != nil {
-		for _, field := range fType.Results.List {
-			recordType(field.Type, fromNode, graph)
-		}
-	}
-}
 
-func recordType(expr ast.Expr, fromNode *DepNode, graph *DepGraph) {
-	switch t := expr.(type) {
-	case *ast.Ident:
-		// Base case: check if this identifier is a known type in our graph
-		if graph.nodes[t.Name] != nil && graph.nodes[t.Name].kind == kindType {
-			fromNode.readsTo[t.Name] = true
-		}
-	case *ast.StarExpr:
-		recordType(t.X, fromNode, graph)
-	case *ast.ArrayType:
-		recordType(t.Elt, fromNode, graph)
-	case *ast.MapType:
-		recordType(t.Key, fromNode, graph)
-		recordType(t.Value, fromNode, graph)
-	case *ast.ChanType:
-		recordType(t.Value, fromNode, graph)
-	case *ast.FuncType:
-		// Recursive case: Function signature as a type (e.g., func(MyType) int)
-		findTypesInFunc(t, fromNode, graph)
-	case *ast.SelectorExpr:
-		// Handle internal package types referenced via selector if applicable
-		if ident, ok := t.X.(*ast.Ident); ok {
-			if graph.nodes[ident.Name] != nil && graph.nodes[ident.Name].kind == kindType {
-				fromNode.readsTo[ident.Name] = true
+		if named, ok := t.Type().(*types.Named); ok {
+			for method := range named.Methods() {
+				nodes = append(nodes, Node{obj: method, pkg: pkg, Kind: kindFunc, Type: funcMethod, Id: id(method), LocalName: t.Name() + "." + method.Name(), Pkg: obj.Pkg().Path()})
 			}
 		}
+		return nodes
+	case *types.Const:
+		return []Node{{obj: obj, pkg: pkg, Kind: kindConst, Id: t.Id(), LocalName: t.Name(), Pkg: obj.Pkg().Path()}}
+	case *types.Var:
+		return []Node{{obj: obj, pkg: pkg, Kind: kindVar, Id: t.Id(), LocalName: t.Name(), Pkg: obj.Pkg().Path()}}
 	}
+
+	return nil
+}
+
+func ifaceMethodId(obj types.Object, iface types.Object) string {
+	pkgPath := ""
+	if obj.Pkg() != nil {
+		pkgPath = obj.Pkg().Path()
+	}
+	typeName := iface.Name()
+	return fmt.Sprintf("(%s.%s).%s", pkgPath, typeName, obj.Name())
+}
+
+func id(obj types.Object) string {
+	pkgPath := ""
+	if obj.Pkg() != nil {
+		pkgPath = obj.Pkg().Path()
+	}
+
+	// Check if the object is a function/method
+	if fn, ok := obj.(*types.Func); ok {
+		sig := fn.Type().(*types.Signature)
+		if recv := sig.Recv(); recv != nil {
+			typeName := recv.Type().String()
+			return fmt.Sprintf("(%s).%s", typeName, obj.Name())
+		}
+	}
+
+	// Default for package-level variables, constants, and types
+	if pkgPath == "" {
+		return obj.Name()
+	}
+	return pkgPath + "." + obj.Name()
+}
+
+func elem(t types.Type) types.Type {
+	switch tt := t.(type) {
+	case *types.Pointer:
+		return elem(tt.Elem())
+	case *types.Chan:
+		return elem(tt.Elem())
+	case *types.Array:
+		return elem(tt.Elem())
+	default:
+		return t
+	}
+}
+
+func nodeContains(parent, child ast.Node) bool {
+	if parent == nil || child == nil {
+		return false
+	}
+	return parent.Pos() <= child.Pos() && child.End() <= parent.End()
 }
