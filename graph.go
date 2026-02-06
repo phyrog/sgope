@@ -95,6 +95,9 @@ func collectDeclarations(file *ast.File, graph *DepGraph) {
 				for _, spec := range node.Specs {
 					if vs, ok := spec.(*ast.ValueSpec); ok {
 						for _, name := range vs.Names {
+							if name.Name == "_" {
+								continue
+							}
 							graph.getOrCreate(name.Name, kind)
 						}
 					}
