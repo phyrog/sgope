@@ -4,7 +4,7 @@
         <meta charset="utf-8" />
         <title>sgope</title>
         <script src="https://d3js.org/d3.v7.min.js"></script>
-        <style>
+        <style id="graph-styles">
             body {
                 margin: 0;
                 padding: 20px;
@@ -34,7 +34,7 @@
                 stroke: #fff7;
                 stroke-width: 1.5px;
                 transition: opacity 0.2s;
-                vector-effect: non-sclaing-stroke;
+                vector-effect: non-scaling-stroke;
             }
             .node.selected {
                 stroke: #fff;
@@ -43,19 +43,37 @@
             }
             .link {
                 stroke: #fff;
-                stroke-opacity: 0.2;
+                stroke-opacity: 0.5;
                 fill: none;
                 pointer-events: none;
                 vector-effect: non-scaling-stroke;
             }
             .link.cross-package {
-                stroke-opacity: 0.15;
                 stroke-dasharray: 4, 4;
+            }
+            .highlight {
+                stroke-opacity: 0.8;
+            }
+            .muted {
+                stroke-opacity: 0.2;
+            }
+            .highlight.out {
+                stroke: #4ecdc4 !important;
+                stroke-width: 2px !important;
+            }
+            .highlight.in {
+                stroke: #ff6b6b !important;
+                stroke-width: 2px !important;
+            }
+            .highlight.internal {
+                stroke: #ffffff !important;
+                stroke-width: 2px !important;
             }
             .node-label {
                 font-size: 10px;
                 pointer-events: none;
                 fill: #fff;
+                text-shadow: #000 1px 0 10px;
             }
             .legend {
                 position: fixed;
@@ -131,21 +149,6 @@
                 border-left-color: #ffd700 !important;
                 background: #3d3d29 !important;
             }
-            .muted {
-                opacity: 0.2 !important;
-            }
-            .highlight-out {
-                stroke: #4ecdc4 !important;
-                stroke-width: 1px !important;
-            }
-            .highlight-in {
-                stroke: #ff6b6b !important;
-                stroke-width: 1px !important;
-            }
-            .highlight-internal {
-                stroke: #ffffff !important;
-                stroke-width: 1px !important;
-            }
             button {
                 background: #444;
                 color: white;
@@ -209,7 +212,7 @@
                     id="link-distance"
                     min="30"
                     max="400"
-                    value="150"
+                    value="320"
             /></label>
             <label
                 >Charge:
@@ -218,55 +221,45 @@
                     id="charge"
                     min="-1200"
                     max="-50"
-                    value="-400"
+                    value="-1050"
             /></label>
             <label
-                >Cluster Strength:
+                >Cluster:
                 <input
                     type="range"
                     id="cluster-strength"
-                    min="0"
+                    min="0.1"
                     max="1"
-                    step="0.1"
-                    value="0.3"
+                    step="0.05"
+                    value="0.2"
             /></label>
             <button id="fit-selection">Fit Selection</button>
             <button id="reset-focus">Reset Focus</button>
-            <p>Nodes: <span id="node-count"></span></p>
-        </div>
-
-        <div class="legend">
-            <div class="legend-item" data-group="test">
-                <div class="legend-color"></div>
-                Tests
-            </div>
-            <div class="legend-item" data-group="type">
-                <div class="legend-color"></div>
-                Types
-            </div>
-            <div class="legend-item" data-group="method">
-                <div class="legend-color"></div>
-                Methods
-            </div>
-            <div class="legend-item" data-group="func">
-                <div class="legend-color"></div>
-                Functions
-            </div>
-            <div class="legend-item" data-group="const">
-                <div class="legend-color"></div>
-                Constants
-            </div>
-            <div class="legend-item" data-group="var">
-                <div class="legend-color"></div>
-                Variables
-            </div>
         </div>
 
         <div class="info">
             <input type="text" id="search-box" placeholder="Search nodes..." />
             <div id="search-results"></div>
-            <div class="sidebar-scroll" id="node-info">
-                <i>Click a node to see details</i>
+            <div id="node-info" class="sidebar-scroll"></div>
+        </div>
+
+        <div class="legend">
+            <div><strong>Node Types</strong></div>
+            <div class="legend-item" data-group="func">
+                <div class="legend-color"></div>
+                <div>Function</div>
+            </div>
+            <div class="legend-item" data-group="type">
+                <div class="legend-color"></div>
+                <div>Type</div>
+            </div>
+            <div class="legend-item" data-group="const">
+                <div class="legend-color"></div>
+                <div>Const</div>
+            </div>
+            <div class="legend-item" data-group="var">
+                <div class="legend-color"></div>
+                <div>Var</div>
             </div>
         </div>
 
@@ -275,125 +268,341 @@
         <script>
             const data = DATA_PLACEHOLDER;
 
-            data.nodes.forEach((n) => {
-                n.group =
-                    n.kind === "func" && n.type === "method"
-                        ? "method"
-                        : n.kind;
-                if (n.pkg.endsWith(".test") || n.pkg.endsWith("_test")) {
-                    n.group = "test";
-                }
-                n.package = n.pkg;
-            });
-            data.links.forEach((l) => {
-                l.source = l.from;
-                l.target = l.to;
-                const sPkg = data.nodes.find((n) => n.id === l.from)?.pkg;
-                const tPkg = data.nodes.find((n) => n.id === l.to)?.pkg;
-                l.crossPackage = sPkg !== tPkg;
-            });
-
-            const width = window.innerWidth;
-            const height = window.innerHeight;
-            let selectedNodeIds = new Set();
-            let activeGroups = new Set(["type", "method", "func"]);
-
-            const svg = d3.select("#graph").on("click", (e) => {
-                if (e.target.tagName === "svg") resetFocus();
-            });
-            const g = svg.append("g");
-            const defs = svg.append("defs");
-
-            const createMarker = (id, color) => {
-                defs.append("marker")
-                    .attr("id", id)
-                    .attr("viewBox", "0 -5 10 10")
-                    .attr("refX", 5)
-                    .attr("refY", 0)
-                    .attr("markerWidth", 6)
-                    .attr("markerHeight", 6)
-                    .attr("orient", "auto")
-                    .append("path")
-                    .attr("d", "M0,-5L10,0L0,5")
-                    .attr("fill", color);
-            };
-            createMarker("arrow-default", "#999");
-            createMarker("arrow-outgoing", "#4ecdc4");
-            createMarker("arrow-incoming", "#ff6b6b");
-            createMarker("arrow-internal", "#ffffff");
-
-            const zoom = d3
-                .zoom()
-                .scaleExtent([0.01, 4])
-                .on("zoom", (e) => {
-                    const { k } = e.transform;
-                    g.attr("transform", e.transform);
-
-                    d3.selectAll(".link").style(
-                        "stroke-opacity",
-                        Math.max(0.05, k * 0.2),
-                    );
-                    d3.selectAll(".highlight-internal").style(
-                        "stroke-opacity",
-                        Math.max(0.1, k * 0.6),
-                    );
-                    d3.selectAll(".highlight-in, .highlight-out").style(
-                        "stroke-opacity",
-                        Math.max(0.2, k * 0.8),
-                    );
-                });
-            svg.call(zoom);
-
+            // Color scheme
             const color = d3.scaleOrdinal(d3.schemeSet3);
 
-            d3.selectAll(".legend-item").each(function (d) {
-                const colorKey = d3.select(this).attr("data-group");
-                d3.select(this)
-                    .select(".legend-color")
-                    .style("background", color(colorKey));
-            });
+            Array.from(document.getElementsByClassName("legend-item")).forEach(
+                (n) => {
+                    const colorKey = n.getAttribute("data-group");
+                    Array.from(
+                        n.getElementsByClassName("legend-color"),
+                    ).forEach((c) => {
+                        c.style = `background: ${color(colorKey)}`;
+                    });
+                },
+            );
 
-            let simulation, link, node, label, midArrow;
+            // Performance optimizations: pre-compute maps and indices
+            class GraphData {
+                constructor(rawData) {
+                    this.nodes = rawData.nodes;
+                    this.links = rawData.links;
+
+                    // Build fast lookup maps
+                    this.nodeById = new Map(this.nodes.map((n) => [n.id, n]));
+
+                    // Index links by source and target for O(1) lookups
+                    this.linksBySource = new Map();
+                    this.linksByTarget = new Map();
+
+                    this.links.forEach((link) => {
+                        if (!this.linksBySource.has(link.from)) {
+                            this.linksBySource.set(link.from, []);
+                        }
+                        if (!this.linksByTarget.has(link.to)) {
+                            this.linksByTarget.set(link.to, []);
+                        }
+                        this.linksBySource.get(link.from).push(link);
+                        this.linksByTarget.get(link.to).push(link);
+                    });
+
+                    // Build package groups
+                    this.packageGroups = new Map();
+                    this.nodes.forEach((node) => {
+                        if (!this.packageGroups.has(node.pkg)) {
+                            this.packageGroups.set(node.pkg, []);
+                        }
+                        this.packageGroups.get(node.pkg).push(node);
+                    });
+                }
+
+                getNode(id) {
+                    return this.nodeById.get(id);
+                }
+
+                getOutgoingLinks(id) {
+                    return this.linksBySource.get(id) || [];
+                }
+
+                getIncomingLinks(id) {
+                    return this.linksByTarget.get(id) || [];
+                }
+            }
+
+            // State management
+            const state = {
+                selectedNodeIds: new Set(),
+                activeGroups: new Set(["func", "type", "const", "var"]),
+                showLabels: true,
+                linkDistance: 200,
+                charge: -300,
+                clusterStrength: 0.3,
+            };
+
+            let graphData, simulation, svg, g, link, node, label, zoom;
+            let width, height;
+            let renderScheduled = false;
+
+            // Debounced render for performance
+            function scheduleRender(callback) {
+                if (!renderScheduled) {
+                    renderScheduled = true;
+                    requestAnimationFrame(() => {
+                        callback();
+                        renderScheduled = false;
+                    });
+                }
+            }
+
+            // Initialize visualization
+            async function init() {
+                graphData = new GraphData(data);
+
+                setupSVG();
+                setupSimulation();
+                loadFromURL();
+                updateGraph();
+                setupEventListeners();
+            }
+
+            function setupSVG() {
+                svg = d3.select("#graph");
+                const bounds = svg.node().getBoundingClientRect();
+                width = bounds.width;
+                height = bounds.height;
+
+                const styleSheet =
+                    document.getElementById("graph-styles").sheet;
+
+                zoom = d3
+                    .zoom()
+                    .scaleExtent([0.01, 4])
+                    .on("zoom", (event) => {
+                        g.attr("transform", event.transform);
+
+                        const baseOpacity = Math.min(
+                            1,
+                            Math.max(0.2, event.transform.k),
+                        );
+
+                        for (let i = 0; i < styleSheet.cssRules.length; i++) {
+                            const rule = styleSheet.cssRules[i];
+                            if (rule.selectorText === ".link") {
+                                rule.style.opacity = baseOpacity;
+                            }
+                            if (rule.selectorText === ".node") {
+                                rule.style.opacity = baseOpacity;
+                            }
+                        }
+                    });
+
+                svg.call(zoom);
+                svg.on("click", () => {
+                    resetFocus();
+                });
+
+                g = svg.append("g");
+                // Use separate groups for links and nodes for better rendering
+                g.append("g").attr("class", "links-group");
+                g.append("g").attr("class", "nodes-group");
+                g.append("g").attr("class", "labels-group");
+            }
+
+            function setupSimulation() {
+                simulation = d3
+                    .forceSimulation()
+                    .force(
+                        "link",
+                        d3
+                            .forceLink()
+                            .id((d) => d.id)
+                            .distance(state.linkDistance),
+                    )
+                    .force("charge", d3.forceManyBody().strength(state.charge))
+                    .force("center", d3.forceCenter(width / 2, height / 2))
+                    .force("x", d3.forceX(width / 2).strength(0.01))
+                    .force("y", d3.forceY(height / 2).strength(0.01))
+                    .force(
+                        "collision",
+                        d3.forceCollide().radius(20).strength(1.0),
+                    )
+                    .alphaDecay(0.00688395157)
+                    .on("tick", onTick)
+                    .on("end", () => console.log("Simulation ended"));
+
+                // Add error handler
+                window.addEventListener("error", (e) => {
+                    console.error(
+                        "Error:",
+                        e.message,
+                        e.filename,
+                        e.lineno,
+                        e.colno,
+                    );
+                });
+            }
+
+            // Optimized tick handler - only update positions, not DOM structure
+            function onTick() {
+                scheduleRender(() => {
+                    if (link) {
+                        link.attr("x1", (d) => d.source.x || 0)
+                            .attr("y1", (d) => d.source.y || 0)
+                            .attr("x2", (d) => d.target.x || 0)
+                            .attr("y2", (d) => d.target.y || 0);
+                    }
+
+                    if (node) {
+                        node.attr("cx", (d) => d.x || 0).attr(
+                            "cy",
+                            (d) => d.y || 0,
+                        );
+                    }
+
+                    if (label && state.showLabels) {
+                        label
+                            .attr("x", (d) => (d.x || 0) + 8)
+                            .attr("y", (d) => (d.y || 0) + 3);
+                    }
+                });
+            }
 
             function updateGraph() {
-                const filteredNodes = data.nodes.filter((n) =>
-                    activeGroups.has(n.group),
+                // Filter nodes and links based on active groups
+                const filteredNodes = graphData.nodes.filter((n) =>
+                    state.activeGroups.has(n.kind),
                 );
-                const nodeIds = new Set(filteredNodes.map((n) => n.id));
-                const filteredLinks = data.links.filter(
-                    (l) => nodeIds.has(l.source) && nodeIds.has(l.target),
+                const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
+                const filteredLinks = graphData.links.filter(
+                    (l) =>
+                        filteredNodeIds.has(l.from) &&
+                        filteredNodeIds.has(l.to),
                 );
 
-                const nodeCount = document.getElementById("node-count");
-                nodeCount.innerHTML = nodeIds.size;
+                // Apply package clustering force
+                if (state.clusterStrength > 0) {
+                    const packageCenters = computePackageCenters(filteredNodes);
 
-                g.selectAll("*").remove();
+                    // Custom clustering force that attracts nodes to package centers
+                    // and repels nodes from other packages
+                    const clusterForce = () => {
+                        const strength = state.clusterStrength;
+                        const alpha = simulation.alpha();
 
-                link = g
-                    .append("g")
+                        filteredNodes.forEach((node) => {
+                            if (!node.pkg) return;
+
+                            const center = packageCenters.get(node.pkg);
+                            if (!center) return;
+
+                            // Attract to own package center
+                            const dx = center.x - node.x;
+                            const dy = center.y - node.y;
+                            node.vx += dx * strength * alpha * 0.1;
+                            node.vy += dy * strength * alpha * 0.1;
+
+                            // Repel from other package centers
+                            packageCenters.forEach((otherCenter, otherPkg) => {
+                                if (otherPkg === node.pkg) return;
+
+                                const dx = node.x - otherCenter.x;
+                                const dy = node.y - otherCenter.y;
+                                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                                const repelStrength =
+                                    (strength * 800) / (dist * dist);
+
+                                node.vx += (dx / dist) * repelStrength * alpha;
+                                node.vy += (dy / dist) * repelStrength * alpha;
+                            });
+                        });
+                    };
+
+                    simulation.force("cluster", clusterForce);
+                } else {
+                    // Remove clustering force if strength is 0
+                    simulation.force("cluster", null);
+                }
+
+                renderGraph(filteredNodes, filteredLinks);
+                updateSidebar();
+            }
+
+            function computePackageCenters(nodes) {
+                const packages = Array.from(graphData.packageGroups.keys());
+                const centers = new Map();
+                const angleStep = (2 * Math.PI) / packages.length;
+                const radius = Math.min(width, height) * 3.5; // Increased radius
+
+                packages.forEach((pkg, i) => {
+                    const angle = i * angleStep;
+                    centers.set(pkg, {
+                        x: width / 2 + radius * Math.cos(angle),
+                        y: height / 2 + radius * Math.sin(angle),
+                    });
+                });
+
+                return centers;
+            }
+
+            function renderGraph(nodes, links) {
+                // Initialize node positions if not set
+                nodes.forEach((node) => {
+                    if (node.x === undefined) {
+                        node.x = width / 2 + (Math.random() - 0.5) * 100;
+                    }
+                    if (node.y === undefined) {
+                        node.y = height / 2 + (Math.random() - 0.5) * 100;
+                    }
+                });
+
+                // Convert links to D3 format (source, target instead of from, to)
+                const d3Links = links.map((l) => ({
+                    source: l.from,
+                    target: l.to,
+                    from: l.from,
+                    to: l.to,
+                }));
+
+                // Update links
+                const linkGroup = g.select(".links-group");
+                link = linkGroup
                     .selectAll("line")
-                    .data(filteredLinks)
-                    .join("line")
-                    .attr("class", (d) =>
-                        d.crossPackage ? "link cross-package" : "link",
-                    );
+                    .data(d3Links, (d) => `${d.from}-${d.to}`);
 
-                midArrow = g
-                    .append("g")
-                    .selectAll("path")
-                    .data(filteredLinks)
-                    .join("path")
-                    .attr("class", "mid-arrow")
-                    .attr("marker-end", "url(#arrow-default)");
+                link.exit().remove();
 
-                node = g
-                    .append("g")
-                    .selectAll("circle")
-                    .data(filteredNodes)
-                    .join("circle")
+                const linkEnter = link
+                    .enter()
+                    .append("line")
+                    .attr("class", (d) => {
+                        const sourceNode = graphData.getNode(d.from);
+                        const targetNode = graphData.getNode(d.to);
+                        return sourceNode?.pkg === targetNode?.pkg
+                            ? "link"
+                            : "link cross-package";
+                    })
+                    .attr("stroke-width", 1)
+                    .attr("x1", 0)
+                    .attr("y1", 0)
+                    .attr("x2", 0)
+                    .attr("y2", 0);
+
+                link = linkEnter.merge(link);
+
+                // Update nodes
+                const nodeGroup = g.select(".nodes-group");
+                node = nodeGroup.selectAll("circle").data(nodes, (d) => d.id);
+
+                node.exit().remove();
+
+                const nodeEnter = node
+                    .enter()
+                    .append("circle")
                     .attr("class", "node")
-                    .attr("r", (d) => (d.group === "test" ? 6 : 10))
-                    .attr("fill", (d) => color(d.group) || "#999")
+                    .attr("r", (d) => getNodeRadius(d))
+                    .attr("fill", (d) => color(d.kind) || "#999")
+                    .attr("cx", (d) => d.x || width / 2)
+                    .attr("cy", (d) => d.y || height / 2)
                     .call(
                         d3
                             .drag()
@@ -401,333 +610,371 @@
                             .on("drag", dragged)
                             .on("end", dragended),
                     )
-                    .on("click", (e, d) => {
-                        e.stopPropagation();
-                        handleSelectionLogic(d.id, e.shiftKey);
+                    .on("click", (event, d) => {
+                        event.stopPropagation();
+                        handleNodeClick(d.id, event.shiftKey);
                     });
 
-                label = g
-                    .append("g")
-                    .selectAll("text")
-                    .data(filteredNodes)
-                    .join("text")
+                node = nodeEnter.merge(node);
+
+                // Update labels
+                const labelGroup = g.select(".labels-group");
+                label = labelGroup.selectAll("text").data(nodes, (d) => d.id);
+
+                label.exit().remove();
+
+                const labelEnter = label
+                    .enter()
+                    .append("text")
                     .attr("class", "node-label")
-                    .attr("dx", 14)
-                    .attr("dy", 4)
                     .text((d) => d.name)
-                    .style(
-                        "display",
-                        document.getElementById("show-labels").checked
-                            ? "block"
-                            : "none",
+                    .attr("x", (d) => (d.x || width / 2) + 8)
+                    .attr("y", (d) => (d.y || height / 2) + 3)
+                    .style("display", state.showLabels ? "block" : "none");
+
+                label = labelEnter.merge(label);
+
+                // Update simulation
+                simulation.nodes(nodes);
+                simulation.force("link").links(d3Links);
+                simulation.alpha(0.3).restart();
+
+                applyHighlighting();
+            }
+
+            function getNodeRadius(node) {
+                const baseRadius = 5;
+                const inDegree = (graphData.getIncomingLinks(node.id) || [])
+                    .length;
+                const outDegree = (graphData.getOutgoingLinks(node.id) || [])
+                    .length;
+                const degree = inDegree + outDegree;
+                return baseRadius + Math.sqrt(degree) * 0.8;
+            }
+
+            function applyHighlighting() {
+                if (state.selectedNodeIds.size === 0) {
+                    node.classed(
+                        "selected muted highlight out in internal",
+                        false,
                     );
+                    link.classed("highlight out in internal muted", false);
+                    return;
+                }
 
-                if (simulation) simulation.stop();
-                simulation = d3
-                    .forceSimulation(filteredNodes)
-                    .force(
-                        "link",
-                        d3
-                            .forceLink(filteredLinks)
-                            .id((d) => d.id)
-                            .distance((d) =>
-                                d.crossPackage
-                                    ? 300
-                                    : +document.getElementById("link-distance")
-                                          .value,
-                            )
-                            .strength((d) => (d.crossPackage ? 0.05 : 0.4)),
-                    )
-                    .force(
-                        "charge",
-                        d3
-                            .forceManyBody()
-                            .strength(+document.getElementById("charge").value),
-                    )
-                    .force("center", d3.forceCenter(width / 2, height / 2))
-                    .force("collision", d3.forceCollide().radius(25));
+                // Build highlight sets for efficiency
+                const highlightNodes = new Set(state.selectedNodeIds);
+                const outgoingNodes = new Set();
+                const incomingNodes = new Set();
+                const highlightLinks = new Set();
 
-                simulation.on("tick", () => {
-                    const rawStrength =
-                        +document.getElementById("cluster-strength").value;
-                    const strength = rawStrength * 0.05 * simulation.alpha();
-
-                    if (strength > 0) {
-                        const centroids = new Map();
-                        filteredNodes.forEach((d) => {
-                            if (!centroids.has(d.pkg))
-                                centroids.set(d.pkg, { x: 0, y: 0, count: 0 });
-                            const c = centroids.get(d.pkg);
-                            c.x += d.x;
-                            c.y += d.y;
-                            c.count++;
-                        });
-                        centroids.forEach((c) => {
-                            c.x /= c.count;
-                            c.y /= c.count;
-                        });
-
-                        filteredNodes.forEach((d) => {
-                            const c = centroids.get(d.pkg);
-                            // Attraction
-                            d.vx += (c.x - d.x) * strength;
-                            d.vy += (c.y - d.y) * strength;
-
-                            // Repulsion from other cluster centers
-                            centroids.forEach((otherC, pkg) => {
-                                if (pkg === d.pkg) return;
-                                const dx = d.x - otherC.x,
-                                    dy = d.y - otherC.y;
-                                const distSq = dx * dx + dy * dy || 1;
-                                // Softer repulsion that also cools with alpha
-                                const force =
-                                    (rawStrength * 30 * simulation.alpha()) /
-                                    distSq;
-                                d.vx += dx * force;
-                                d.vy += dy * force;
-                            });
-                        });
-                    }
-
-                    link.attr("x1", (d) => d.source.x)
-                        .attr("y1", (d) => d.source.y)
-                        .attr("x2", (d) => d.target.x)
-                        .attr("y2", (d) => d.target.y);
-                    midArrow.attr("d", (d) => {
-                        const midX = (d.source.x + d.target.x) / 2,
-                            midY = (d.source.y + d.target.y) / 2;
-                        const angle = Math.atan2(
-                            d.target.y - d.source.y,
-                            d.target.x - d.source.x,
-                        );
-                        return `M${midX},${midY} L${midX + Math.cos(angle)},${midY + Math.sin(angle)}`;
+                state.selectedNodeIds.forEach((id) => {
+                    graphData.getOutgoingLinks(id).forEach((l) => {
+                        outgoingNodes.add(l.to);
+                        highlightLinks.add(`${l.from}-${l.to}`);
                     });
-                    node.attr("cx", (d) => d.x).attr("cy", (d) => d.y);
-                    label.attr("x", (d) => d.x).attr("y", (d) => d.y);
+                    graphData.getIncomingLinks(id).forEach((l) => {
+                        incomingNodes.add(l.from);
+                        highlightLinks.add(`${l.from}-${l.to}`);
+                    });
                 });
-                if (selectedNodeIds.size > 0) applyFocus();
+
+                // Apply node classes
+                node.classed("selected", (d) =>
+                    state.selectedNodeIds.has(d.id),
+                ).classed(
+                    "muted",
+                    (d) =>
+                        !highlightNodes.has(d.id) &&
+                        !outgoingNodes.has(d.id) &&
+                        !incomingNodes.has(d.id),
+                );
+
+                // Apply link classes
+                link.classed(
+                    "highlight",
+                    (d) =>
+                        state.selectedNodeIds.has(d.from) ||
+                        state.selectedNodeIds.has(d.to),
+                )
+                    .classed(
+                        "out",
+                        (d) =>
+                            state.selectedNodeIds.has(d.from) &&
+                            outgoingNodes.has(d.to),
+                    )
+                    .classed(
+                        "in",
+                        (d) =>
+                            state.selectedNodeIds.has(d.to) &&
+                            incomingNodes.has(d.from),
+                    )
+                    .classed(
+                        "internal",
+                        (d) =>
+                            state.selectedNodeIds.has(d.from) &&
+                            state.selectedNodeIds.has(d.to),
+                    )
+                    .classed(
+                        "muted",
+                        (d) =>
+                            !state.selectedNodeIds.has(d.from) &&
+                            !state.selectedNodeIds.has(d.to),
+                    );
             }
 
-            function handleSelectionLogic(id, isShift) {
+            function handleNodeClick(nodeId, shiftKey) {
+                document.getSelection().removeAllRanges();
+
                 const newSelections = new Set();
-                const targetNode = data.nodes.find((n) => n.id === id);
+                const targetNode = graphData.getNode(nodeId);
+
+                // If selecting a type, also select its methods
                 if (targetNode && targetNode.kind === "type") {
-                    newSelections.add(id);
-                    data.nodes.forEach((n) => {
-                        if (
-                            n.group === "method" &&
-                            n.name.startsWith(targetNode.name + ".")
-                        )
-                            newSelections.add(n.id);
+                    newSelections.add(nodeId);
+                    const typeName = targetNode.name;
+
+                    // Find all methods belonging to this type
+                    // Methods have kind="func", type="method", and name starts with "TypeName."
+                    // or id contains "(*pkg.TypeName)." or "(pkg.TypeName)."
+                    graphData.nodes.forEach((n) => {
+                        if (n.kind === "func" && n.type === "method") {
+                            // Check if method name starts with TypeName.
+                            if (n.name.startsWith(typeName + ".")) {
+                                newSelections.add(n.id);
+                            }
+                            // Also check ID patterns like (*pkg.Graph).Method or (pkg.Graph).Method
+                            else if (
+                                n.id.includes(
+                                    "(*" +
+                                        targetNode.pkg +
+                                        "." +
+                                        typeName +
+                                        ").",
+                                ) ||
+                                n.id.includes(
+                                    "(" +
+                                        targetNode.pkg +
+                                        "." +
+                                        typeName +
+                                        ").",
+                                )
+                            ) {
+                                newSelections.add(n.id);
+                            }
+                        }
                     });
                 } else {
-                    newSelections.add(id);
+                    newSelections.add(nodeId);
                 }
-                if (isShift) {
+
+                if (shiftKey) {
+                    // Toggle selection
                     newSelections.forEach((sid) => {
-                        if (selectedNodeIds.has(sid))
-                            selectedNodeIds.delete(sid);
-                        else selectedNodeIds.add(sid);
+                        if (state.selectedNodeIds.has(sid)) {
+                            state.selectedNodeIds.delete(sid);
+                        } else {
+                            state.selectedNodeIds.add(sid);
+                        }
                     });
                 } else {
-                    selectedNodeIds.clear();
-                    newSelections.forEach((sid) => selectedNodeIds.add(sid));
+                    // Replace selection
+                    state.selectedNodeIds = new Set(newSelections);
                 }
-                if (selectedNodeIds.size === 0) resetFocus();
-                else applyFocus();
+
+                applyHighlighting();
+                updateSidebar();
                 updateURL();
-            }
-
-            function applyFocus() {
-                const connectedNodes = new Set(selectedNodeIds);
-                const extOut = data.links.filter(
-                    (l) =>
-                        selectedNodeIds.has(l.source.id || l.source) &&
-                        !selectedNodeIds.has(l.target.id || l.target),
-                );
-                const extIn = data.links.filter(
-                    (l) =>
-                        !selectedNodeIds.has(l.source.id || l.source) &&
-                        selectedNodeIds.has(l.target.id || l.target),
-                );
-
-                extOut.forEach((l) =>
-                    connectedNodes.add(l.target.id || l.target),
-                );
-                extIn.forEach((l) =>
-                    connectedNodes.add(l.source.id || l.source),
-                );
-
-                node.classed("muted", (d) => !connectedNodes.has(d.id)).classed(
-                    "selected",
-                    (d) => selectedNodeIds.has(d.id),
-                );
-                label.classed("muted", (d) => !connectedNodes.has(d.id));
-                link.classed("muted", true)
-                    .classed("highlight-out", false)
-                    .classed("highlight-in", false)
-                    .classed("highlight-internal", false);
-                midArrow
-                    .classed("muted", true)
-                    .attr("marker-end", "url(#arrow-default)");
-
-                link.filter(
-                    (l) =>
-                        selectedNodeIds.has(l.source.id || l.source) &&
-                        !selectedNodeIds.has(l.target.id || l.target),
-                )
-                    .classed("muted", false)
-                    .classed("highlight-out", true);
-                midArrow
-                    .filter(
-                        (l) =>
-                            selectedNodeIds.has(l.source.id || l.source) &&
-                            !selectedNodeIds.has(l.target.id || l.target),
-                    )
-                    .classed("muted", false)
-                    .attr("marker-end", "url(#arrow-outgoing)");
-                link.filter(
-                    (l) =>
-                        !selectedNodeIds.has(l.source.id || l.source) &&
-                        selectedNodeIds.has(l.target.id || l.target),
-                )
-                    .classed("muted", false)
-                    .classed("highlight-in", true);
-                midArrow
-                    .filter(
-                        (l) =>
-                            !selectedNodeIds.has(l.source.id || l.source) &&
-                            selectedNodeIds.has(l.target.id || l.target),
-                    )
-                    .classed("muted", false)
-                    .attr("marker-end", "url(#arrow-incoming)");
-                link.filter(
-                    (l) =>
-                        selectedNodeIds.has(l.source.id || l.source) &&
-                        selectedNodeIds.has(l.target.id || l.target),
-                )
-                    .classed("muted", false)
-                    .classed("highlight-internal", true);
-                midArrow
-                    .filter(
-                        (l) =>
-                            selectedNodeIds.has(l.source.id || l.source) &&
-                            selectedNodeIds.has(l.target.id || l.target),
-                    )
-                    .classed("muted", false)
-                    .attr("marker-end", "url(#arrow-internal)");
-
-                updateSidebar(extIn, extOut);
             }
 
             function resetFocus() {
-                selectedNodeIds.clear();
-                node.classed("muted", false).classed("selected", false);
-                label.classed("muted", false);
-                link.classed("muted", false)
-                    .classed("highlight-out", false)
-                    .classed("highlight-in", false)
-                    .classed("highlight-internal", false);
-                midArrow
-                    .classed("muted", false)
-                    .attr("marker-end", "url(#arrow-default)");
-                document.getElementById("node-info").innerHTML =
-                    "<i>Click a node to see details</i>";
-                document.getElementById("search-box").value = "";
-                document.getElementById("search-results").innerHTML = "";
+                state.selectedNodeIds.clear();
+                applyHighlighting();
+                updateSidebar();
                 updateURL();
             }
 
-            function updateSidebar(incoming, outgoing) {
+            function updateSidebar() {
                 const info = document.getElementById("node-info");
-                let html = "<h3>Focus Mode</h3>";
-                const getSortedIds = (links, key) =>
-                    Array.from(
-                        new Set(
-                            links.map((l) =>
-                                typeof l[key] === "object" ? l[key].id : l[key],
-                            ),
-                        ),
-                    ).sort();
-                const outIds = getSortedIds(outgoing, "target"),
-                    inIds = getSortedIds(incoming, "source"),
-                    selIds = Array.from(selectedNodeIds).sort();
-                const getDisplayName = (id) => {
-                    const n = data.nodes.find((x) => x.id === id);
-                    return n ? n.name : id;
-                };
-                const getPackageBadge = (id) => {
-                    const n = data.nodes.find((x) => x.id === id);
-                    return n
-                        ? `<span class="pkg-badge">${n.pkg.split("/").pop()}</span>`
-                        : "";
-                };
-                html +=
-                    "<span class='section-header'>Selected</span><ul class='sidebar-list'>";
-                selIds.forEach(
-                    (id) =>
-                        (html += `<li class='li-selected' onclick="handleSelectionLogic('${id}', event.shiftKey)">${getDisplayName(id)}${getPackageBadge(id)}</li>`),
-                );
-                html += `</ul><span class='section-header'>Outgoing (${outIds.length})</span><ul class='sidebar-list'>`;
-                outIds.forEach(
-                    (id) =>
-                        (html += `<li class='li-outgoing' onclick="handleSelectionLogic('${id}', event.shiftKey)">${getDisplayName(id)}${getPackageBadge(id)}</li>`),
-                );
-                html += `</ul><span class='section-header'>Incoming (${inIds.length})</span><ul class='sidebar-list'>`;
-                inIds.forEach(
-                    (id) =>
-                        (html += `<li class='li-incoming' onclick="handleSelectionLogic('${id}', event.shiftKey)">${getDisplayName(id)}${getPackageBadge(id)}</li>`),
-                );
-                info.innerHTML = html + "</ul>";
-            }
 
-            document
-                .querySelectorAll(".legend-item[data-group]")
-                .forEach((item) => {
-                    item.addEventListener("click", () => {
-                        const group = item.getAttribute("data-group");
-                        if (activeGroups.has(group)) {
-                            activeGroups.delete(group);
-                            item.classList.add("inactive");
-                        } else {
-                            activeGroups.add(group);
-                            item.classList.remove("inactive");
+                if (state.selectedNodeIds.size === 0) {
+                    info.innerHTML = "<p>Click a node to see details</p>";
+                    return;
+                }
+
+                const outgoing = [];
+                const incoming = [];
+
+                state.selectedNodeIds.forEach((id) => {
+                    graphData.getOutgoingLinks(id).forEach((l) => {
+                        if (!state.selectedNodeIds.has(l.to)) {
+                            outgoing.push({ ...l, target: l.to });
                         }
-                        updateGraph();
-                        updateURL();
+                    });
+                    graphData.getIncomingLinks(id).forEach((l) => {
+                        if (!state.selectedNodeIds.has(l.from)) {
+                            incoming.push({ ...l, source: l.from });
+                        }
                     });
                 });
 
-            document
-                .getElementById("search-box")
-                .addEventListener("input", (e) => {
-                    const term = e.target.value.toLowerCase();
-                    const resultsDiv =
-                        document.getElementById("search-results");
-                    if (term.length < 1) {
-                        resultsDiv.innerHTML = "";
-                        return;
-                    }
-                    const matches = data.nodes.filter((n) =>
-                        n.name.toLowerCase().includes(term),
-                    );
-                    let html = "<ul class='sidebar-list'>";
-                    matches.forEach(
-                        (m) =>
-                            (html += `<li class='li-search' onclick="handleSelectionLogic('${m.id}', event.shiftKey)">${m.name}<span class="pkg-badge">${m.pkg.split("/").pop()}</span></li>`),
-                    );
-                    resultsDiv.innerHTML = html + "</ul>";
+                const getSortedIds = (links, key) =>
+                    Array.from(new Set(links.map((l) => l[key]))).sort();
+
+                const outIds = getSortedIds(outgoing, "target");
+                const inIds = getSortedIds(incoming, "source");
+                const selIds = Array.from(state.selectedNodeIds).sort();
+
+                let html =
+                    "<span class='section-header'>Selected</span><ul class='sidebar-list'>";
+                selIds.forEach((id) => {
+                    const node = graphData.getNode(id);
+                    const displayName = node ? node.name : id;
+                    const pkgBadge = node
+                        ? `<span class="pkg-badge">${node.pkg.split("/").pop()}</span>`
+                        : "";
+                    html += `<li class='li-selected' onclick="handleNodeClick('${id}', event.shiftKey)">${displayName}${pkgBadge}</li>`;
                 });
+
+                html += `</ul><span class='section-header'>Outgoing (${outIds.length})</span><ul class='sidebar-list'>`;
+                outIds.forEach((id) => {
+                    const node = graphData.getNode(id);
+                    const displayName = node ? node.name : id;
+                    const pkgBadge = node
+                        ? `<span class="pkg-badge">${node.pkg.split("/").pop()}</span>`
+                        : "";
+                    html += `<li class='li-outgoing' onclick="handleNodeClick('${id}', event.shiftKey)">${displayName}${pkgBadge}</li>`;
+                });
+
+                html += `</ul><span class='section-header'>Incoming (${inIds.length})</span><ul class='sidebar-list'>`;
+                inIds.forEach((id) => {
+                    const node = graphData.getNode(id);
+                    const displayName = node ? node.name : id;
+                    const pkgBadge = node
+                        ? `<span class="pkg-badge">${node.pkg.split("/").pop()}</span>`
+                        : "";
+                    html += `<li class='li-incoming' onclick="handleNodeClick('${id}', event.shiftKey)">${displayName}${pkgBadge}</li>`;
+                });
+
+                info.innerHTML = html + "</ul>";
+            }
+
+            function setupEventListeners() {
+                // Legend filtering
+                document
+                    .querySelectorAll(".legend-item[data-group]")
+                    .forEach((item) => {
+                        item.addEventListener("click", () => {
+                            const group = item.getAttribute("data-group");
+                            if (state.activeGroups.has(group)) {
+                                state.activeGroups.delete(group);
+                                item.classList.add("inactive");
+                            } else {
+                                state.activeGroups.add(group);
+                                item.classList.remove("inactive");
+                            }
+                            updateGraph();
+                            updateURL();
+                        });
+                    });
+
+                // Search with debouncing
+                let searchTimeout;
+                document
+                    .getElementById("search-box")
+                    .addEventListener("input", (e) => {
+                        clearTimeout(searchTimeout);
+                        searchTimeout = setTimeout(() => {
+                            handleSearch(e.target.value);
+                        }, 150);
+                    });
+
+                // Controls
+                document
+                    .getElementById("show-labels")
+                    .addEventListener("change", (e) => {
+                        state.showLabels = e.target.checked;
+                        label.style(
+                            "display",
+                            state.showLabels ? "block" : "none",
+                        );
+                        updateURL();
+                    });
+
+                document
+                    .getElementById("link-distance")
+                    .addEventListener("input", (e) => {
+                        state.linkDistance = +e.target.value;
+                        simulation.force("link").distance(state.linkDistance);
+                        simulation.alpha(0.3).restart();
+                        updateURL();
+                    });
+
+                document
+                    .getElementById("charge")
+                    .addEventListener("input", (e) => {
+                        state.charge = +e.target.value;
+                        simulation.force("charge").strength(state.charge);
+                        simulation.alpha(0.3).restart();
+                        updateURL();
+                    });
+
+                document
+                    .getElementById("cluster-strength")
+                    .addEventListener("input", (e) => {
+                        state.clusterStrength = +e.target.value;
+                        simulation.alpha(0.3).restart();
+                        updateURL();
+                    });
+
+                document
+                    .getElementById("fit-selection")
+                    .addEventListener("click", fitSelection);
+
+                document
+                    .getElementById("reset-focus")
+                    .addEventListener("click", resetFocus);
+
+                window.onhashchange = () => {
+                    loadFromURL();
+                    updateGraph();
+                };
+            }
+
+            function handleSearch(term) {
+                const resultsDiv = document.getElementById("search-results");
+
+                if (term.length < 1) {
+                    resultsDiv.innerHTML = "";
+                    return;
+                }
+
+                const normalizedTerm = term.toLowerCase();
+                const matches = graphData.nodes
+                    .filter((n) =>
+                        n.name.toLowerCase().includes(normalizedTerm),
+                    )
+                    .slice(0, 50); // Limit results for performance
+
+                let html = "<ul class='sidebar-list'>";
+                matches.forEach((m) => {
+                    const pkgBadge = `<span class="pkg-badge">${m.pkg.split("/").pop()}</span>`;
+                    html += `<li class='li-search' onclick="handleNodeClick('${m.id}', event.shiftKey)">${m.name}${pkgBadge}</li>`;
+                });
+                resultsDiv.innerHTML = html + "</ul>";
+            }
 
             function dragstarted(event) {
                 if (!event.active) simulation.alphaTarget(0.3).restart();
                 event.subject.fx = event.subject.x;
                 event.subject.fy = event.subject.y;
             }
+
             function dragged(event) {
                 event.subject.fx = event.x;
                 event.subject.fy = event.y;
             }
+
             function dragended(event) {
                 if (!event.active) simulation.alphaTarget(0);
                 event.subject.fx = null;
@@ -735,30 +982,41 @@
             }
 
             function fitSelection() {
-                if (selectedNodeIds.size === 0) return;
-                const selectedNodes = data.nodes.filter((n) =>
-                    selectedNodeIds.has(n.id),
+                if (state.selectedNodeIds.size === 0) return;
+
+                const selectedNodes = graphData.nodes.filter((n) =>
+                    state.selectedNodeIds.has(n.id),
                 );
+
+                // Filter out nodes without positions
+                const positionedNodes = selectedNodes.filter(
+                    (n) => n.x !== undefined && n.y !== undefined,
+                );
+                if (positionedNodes.length === 0) return;
+
                 let minX = Infinity,
                     minY = Infinity,
                     maxX = -Infinity,
                     maxY = -Infinity;
-                selectedNodes.forEach((n) => {
+
+                positionedNodes.forEach((n) => {
                     if (n.x < minX) minX = n.x;
                     if (n.y < minY) minY = n.y;
                     if (n.x > maxX) maxX = n.x;
                     if (n.y > maxY) maxY = n.y;
                 });
-                const padding = 100,
-                    selectionWidth = maxX - minX,
-                    selectionHeight = maxY - minY;
+
+                const padding = 100;
+                const selectionWidth = maxX - minX;
+                const selectionHeight = maxY - minY;
                 const scale = Math.min(
                     width / (selectionWidth || 1),
                     height / (selectionHeight || 1),
                     2,
                 );
-                const centerX = (minX + maxX) / 2,
-                    centerY = (minY + maxY) / 2;
+                const centerX = (minX + maxX) / 2;
+                const centerY = (minY + maxY) / 2;
+
                 svg.transition()
                     .duration(750)
                     .call(
@@ -772,96 +1030,85 @@
                     );
             }
 
-            document
-                .getElementById("show-labels")
-                .addEventListener("change", (e) => {
-                    label.style("display", e.target.checked ? "block" : "none");
-                    updateURL();
-                });
-            document
-                .getElementById("link-distance")
-                .addEventListener("input", (e) => {
-                    simulation.force("link").distance(e.target.value);
-                    simulation.alpha(0.3).restart();
-                    updateURL();
-                });
-            document.getElementById("charge").addEventListener("input", (e) => {
-                simulation.force("charge").strength(+e.target.value);
-                simulation.alpha(0.3).restart();
-                updateURL();
-            });
-            document
-                .getElementById("cluster-strength")
-                .addEventListener("input", () => {
-                    simulation.alpha(0.3).restart();
-                    updateURL();
-                });
-            document
-                .getElementById("fit-selection")
-                .addEventListener("click", fitSelection);
-            document
-                .getElementById("reset-focus")
-                .addEventListener("click", resetFocus);
-
             function updateURL() {
                 const params = new URLSearchParams();
-                if (selectedNodeIds.size > 0)
-                    params.set("sel", Array.from(selectedNodeIds).join(","));
-                params.set("groups", Array.from(activeGroups).join(","));
-                params.set(
-                    "labels",
-                    document.getElementById("show-labels").checked,
-                );
-                params.set(
-                    "dist",
-                    document.getElementById("link-distance").value,
-                );
-                params.set("charge", document.getElementById("charge").value);
-                params.set(
-                    "cluster",
-                    document.getElementById("cluster-strength").value,
-                );
+                if (state.selectedNodeIds.size > 0) {
+                    params.set(
+                        "sel",
+                        Array.from(state.selectedNodeIds).join(","),
+                    );
+                }
+                params.set("groups", Array.from(state.activeGroups).join(","));
+                params.set("labels", state.showLabels);
+                params.set("dist", state.linkDistance);
+                params.set("charge", state.charge);
+                params.set("cluster", state.clusterStrength);
                 window.history.pushState(null, "", "#" + params.toString());
             }
 
             function loadFromURL() {
                 const hash = window.location.hash.substring(1);
                 if (!hash) return;
+
                 const params = new URLSearchParams(hash);
-                if (params.has("sel"))
-                    selectedNodeIds = new Set(params.get("sel").split(","));
+
+                if (params.has("sel")) {
+                    state.selectedNodeIds = new Set(
+                        params.get("sel").split(","),
+                    );
+                }
+
                 if (params.has("groups")) {
-                    activeGroups = new Set(params.get("groups").split(","));
+                    state.activeGroups = new Set(
+                        params.get("groups").split(","),
+                    );
                     document
                         .querySelectorAll(".legend-item[data-group]")
                         .forEach((i) =>
                             i.classList.toggle(
                                 "inactive",
-                                !activeGroups.has(i.getAttribute("data-group")),
+                                !state.activeGroups.has(
+                                    i.getAttribute("data-group"),
+                                ),
                             ),
                         );
                 }
-                if (params.has("labels"))
+
+                if (params.has("labels")) {
+                    state.showLabels = params.get("labels") === "true";
                     document.getElementById("show-labels").checked =
-                        params.get("labels") === "true";
-                if (params.has("dist"))
+                        state.showLabels;
+                }
+
+                if (params.has("dist")) {
+                    state.linkDistance = +params.get("dist");
                     document.getElementById("link-distance").value =
-                        params.get("dist");
-                if (params.has("charge"))
-                    document.getElementById("charge").value =
-                        params.get("charge");
-                if (params.has("cluster"))
+                        state.linkDistance;
+                    if (simulation) {
+                        simulation.force("link").distance(state.linkDistance);
+                    }
+                }
+
+                if (params.has("charge")) {
+                    state.charge = +params.get("charge");
+                    document.getElementById("charge").value = state.charge;
+                    if (simulation) {
+                        simulation.force("charge").strength(state.charge);
+                    }
+                }
+
+                if (params.has("cluster")) {
+                    state.clusterStrength = +params.get("cluster");
                     document.getElementById("cluster-strength").value =
-                        params.get("cluster");
+                        state.clusterStrength;
+                }
             }
 
-            loadFromURL();
-            updateGraph();
-            window.handleSelectionLogic = handleSelectionLogic;
-            window.onhashchange = () => {
-                loadFromURL();
-                updateGraph();
-            };
+            // Make handleNodeClick globally accessible
+            window.handleNodeClick = handleNodeClick;
+
+            // Initialize on load
+            init();
         </script>
     </body>
 </html>
