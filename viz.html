@@ -258,6 +258,10 @@
                 <div class="legend-color"></div>
                 <div>Type</div>
             </div>
+            <div class="legend-item" data-group="method">
+                <div class="legend-color"></div>
+                <div>Method</div>
+            </div>
             <div class="legend-item" data-group="const">
                 <div class="legend-color"></div>
                 <div>Const</div>
@@ -337,7 +341,13 @@
             // State management
             const state = {
                 selectedNodeIds: new Set(),
-                activeGroups: new Set(["func", "type", "const", "var"]),
+                activeGroups: new Set([
+                    "func",
+                    "type",
+                    "method",
+                    "const",
+                    "var",
+                ]),
                 showLabels: true,
                 linkDistance: 200,
                 charge: -300,
@@ -474,9 +484,12 @@
 
             function updateGraph() {
                 // Filter nodes and links based on active groups
-                const filteredNodes = graphData.nodes.filter((n) =>
-                    state.activeGroups.has(n.kind),
-                );
+                const filteredNodes = graphData.nodes.filter((n) => {
+                    if (n.kind === "func" && n.type === "method") {
+                        return state.activeGroups.has("method");
+                    }
+                    return state.activeGroups.has(n.kind);
+                });
                 const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
                 const filteredLinks = graphData.links.filter(
                     (l) =>
