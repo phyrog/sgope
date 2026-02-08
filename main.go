@@ -20,7 +20,7 @@ func main() {
 
 	args := flag.Args()
 	if len(args) < 1 {
-		fmt.Println("Usage: dep [-viz] [-port 8080] <package-path> [<package-path>...] ")
+		fmt.Println("Usage: sgope [-viz] [-port 8080] <package-path> [<package-path>...] ")
 		fmt.Println("  Use '...' suffix for recursive package discovery (e.g., ./pkg/...)")
 		os.Exit(1)
 	}
