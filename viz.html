@@ -12,12 +12,16 @@
                 background: #1a1a1a;
                 color: #fff;
                 overflow: hidden;
+                display: flex;
+                flex-direction: column;
+                height: 100vh;
+                box-sizing: border-box;
             }
             #graph {
                 border: 1px solid #444;
                 background: #222;
                 width: 100%;
-                height: calc(100vh - 150px);
+                flex-grow: 1;
             }
             .controls {
                 margin-bottom: 20px;
@@ -234,7 +238,8 @@
                     value="0.2"
             /></label>
             <button id="fit-selection">Fit Selection</button>
-            <button id="reset-focus">Reset Focus</button>
+            <button id="reset-focus">Reset Focus</button
+            ><button id="export-svg">Export SVG</button>
         </div>
 
         <div class="info">
@@ -934,6 +939,57 @@
                 document
                     .getElementById("reset-focus")
                     .addEventListener("click", resetFocus);
+
+                document
+                    .getElementById("export-svg")
+                    .addEventListener("click", () => {
+                        // Clone the SVG to avoid modifying the live one
+                        const svgEl = document.getElementById("graph");
+                        const w = svgEl.width;
+                        const h = svgEl.height;
+                        const clone = svgEl.cloneNode(true);
+
+                        // Explicitly add the namespace and styles for standalone viewing
+                        clone.setAttribute(
+                            "xmlns",
+                            "http://www.w3.org/2000/svg",
+                        );
+                        clone.setAttribute(
+                            "width",
+                            `${w.baseVal.value}${w.baseVal.unitType}`,
+                        );
+                        clone.setAttribute(
+                            "height",
+                            `${h.baseVal.value}${h.baseVal.unitType}`,
+                        );
+
+                        // Inline the styles so the exported file looks correct
+                        const styleString = Array.from(
+                            document.styleSheets[0].cssRules,
+                        )
+                            .map((rule) => rule.cssText)
+                            .join(" ");
+                        const styleEl = document.createElement("style");
+                        styleEl.textContent = styleString;
+                        clone.prepend(styleEl);
+
+                        // Serialize and download
+                        const svgData = new XMLSerializer().serializeToString(
+                            clone,
+                        );
+                        const blob = new Blob([svgData], {
+                            type: "image/svg+xml;charset=utf-8",
+                        });
+                        const url = URL.createObjectURL(blob);
+
+                        const link = document.createElement("a");
+                        link.href = url;
+                        link.download = `graph-export-${new Date().getTime()}.svg`;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        URL.revokeObjectURL(url);
+                    });
 
                 window.onhashchange = () => {
                     loadFromURL();
