@@ -200,6 +200,21 @@
                 margin-left: 4px;
                 color: #aaa;
             }
+            .hide-btn {
+                float: right;
+                font-size: 9px;
+                padding: 1px 5px;
+                margin-left: 5px;
+                background: #555;
+                border: 1px solid #666;
+                color: #aaa;
+                cursor: pointer;
+                border-radius: 2px;
+            }
+            .hide-btn:hover {
+                background: #666;
+                color: #fff;
+            }
         </style>
     </head>
     <body>
@@ -352,6 +367,7 @@
                 linkDistance: 200,
                 charge: -300,
                 clusterStrength: 0.3,
+                hiddenNodeIds: new Set(),
             };
 
             let graphData, simulation, svg, g, link, node, label, zoom;
@@ -485,10 +501,16 @@
             function updateGraph() {
                 // Filter nodes and links based on active groups
                 const filteredNodes = graphData.nodes.filter((n) => {
+                    let show = true;
+
                     if (n.kind === "func" && n.type === "method") {
-                        return state.activeGroups.has("method");
+                        show &&= state.activeGroups.has("method");
                     }
-                    return state.activeGroups.has(n.kind);
+                    show &&= state.activeGroups.has(n.kind);
+
+                    show &&= !state.hiddenNodeIds.has(n.id);
+
+                    return show;
                 });
                 const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
                 const filteredLinks = graphData.links.filter(
@@ -668,6 +690,17 @@
                     .length;
                 const degree = inDegree + outDegree;
                 return baseRadius + Math.sqrt(degree) * 0.8;
+            }
+
+            function toggleNodeVisibility(nodeId) {
+                if (state.hiddenNodeIds.has(nodeId)) {
+                    state.hiddenNodeIds.delete(nodeId);
+                } else {
+                    state.hiddenNodeIds.add(nodeId);
+                }
+                applyHighlighting();
+                updateSidebar();
+                updateGraph();
             }
 
             function applyHighlighting() {
@@ -851,7 +884,9 @@
                     const pkgBadge = node
                         ? `<span class="pkg-badge">${node.pkg.split("/").pop()}</span>`
                         : "";
-                    html += `<li class='li-selected' onclick="handleNodeClick('${id}', event.shiftKey)">${displayName}${pkgBadge}</li>`;
+                    const isHidden = state.hiddenNodeIds.has(id);
+                    const btnText = isHidden ? "show" : "hide";
+                    html += `<li class='li-selected' onclick="handleNodeClick('${id}', event.shiftKey)"><button class='hide-btn' onclick="event.stopPropagation(); toggleNodeVisibility('${id}')">${btnText}</button>${displayName}${pkgBadge}</li>`;
                 });
 
                 html += `</ul><span class='section-header'>Outgoing (${outIds.length})</span><ul class='sidebar-list'>`;
@@ -861,7 +896,9 @@
                     const pkgBadge = node
                         ? `<span class="pkg-badge">${node.pkg.split("/").pop()}</span>`
                         : "";
-                    html += `<li class='li-outgoing' onclick="handleNodeClick('${id}', event.shiftKey)">${displayName}${pkgBadge}</li>`;
+                    const isHidden = state.hiddenNodeIds.has(id);
+                    const btnText = isHidden ? "show" : "hide";
+                    html += `<li class='li-outgoing' onclick="handleNodeClick('${id}', event.shiftKey)"><button class='hide-btn' onclick="event.stopPropagation(); toggleNodeVisibility('${id}')">${btnText}</button>${displayName}${pkgBadge}</li>`;
                 });
 
                 html += `</ul><span class='section-header'>Incoming (${inIds.length})</span><ul class='sidebar-list'>`;
@@ -871,7 +908,9 @@
                     const pkgBadge = node
                         ? `<span class="pkg-badge">${node.pkg.split("/").pop()}</span>`
                         : "";
-                    html += `<li class='li-incoming' onclick="handleNodeClick('${id}', event.shiftKey)">${displayName}${pkgBadge}</li>`;
+                    const isHidden = state.hiddenNodeIds.has(id);
+                    const btnText = isHidden ? "show" : "hide";
+                    html += `<li class='li-incoming' onclick="handleNodeClick('${id}', event.shiftKey)"><button class='hide-btn' onclick="event.stopPropagation(); toggleNodeVisibility('${id}')">${btnText}</button>${displayName}${pkgBadge}</li>`;
                 });
 
                 info.innerHTML = html + "</ul>";
@@ -1028,7 +1067,9 @@
                 let html = "<ul class='sidebar-list'>";
                 matches.forEach((m) => {
                     const pkgBadge = `<span class="pkg-badge">${m.pkg.split("/").pop()}</span>`;
-                    html += `<li class='li-search' onclick="handleNodeClick('${m.id}', event.shiftKey)">${m.name}${pkgBadge}</li>`;
+                    const isHidden = state.hiddenNodeIds.has(m.id);
+                    const btnText = isHidden ? "show" : "hide";
+                    html += `<li class='li-search' onclick="handleNodeClick('${m.id}', event.shiftKey)"><button class='hide-btn' onclick="event.stopPropagation(); toggleNodeVisibility('${m.id}')">${btnText}</button>${m.name}${pkgBadge}</li>`;
                 });
                 resultsDiv.innerHTML = html + "</ul>";
             }
@@ -1175,6 +1216,7 @@
 
             // Make handleNodeClick globally accessible
             window.handleNodeClick = handleNodeClick;
+            window.toggleNodeVisibility = toggleNodeVisibility;
 
             // Initialize on load
             init();
