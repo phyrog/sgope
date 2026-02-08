@@ -1,4 +1,4 @@
-module play.ground/dep
+module github.com/phyrog/sgope
 
 go 1.25.7
 
