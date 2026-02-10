@@ -3,13 +3,13 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -64,39 +64,10 @@ func main() {
 	}
 }
 
-// expandRecursive finds all Go package directories under baseDir
-func expandRecursive(baseDir string) []string {
-	var packages []string
+//go:embed viz.html
+var html string
 
-	filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip directories with errors
-		}
-
-		if !info.IsDir() {
-			return nil
-		}
-
-		// Check if directory contains .go files
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return nil
-		}
-
-		hasGoFiles := false
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
-				hasGoFiles = true
-				break
-			}
-		}
-
-		if hasGoFiles {
-			packages = append(packages, path)
-		}
-
-		return nil
-	})
-
-	return packages
+// generateHTML takes JSON data as a string and embeds it in the HTML
+func generateHTML(jsonData string) string {
+	return strings.Replace(html, "DATA_PLACEHOLDER", jsonData, 1)
 }

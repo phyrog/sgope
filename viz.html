@@ -48,7 +48,7 @@
             }
             .link {
                 stroke: #fff;
-                stroke-opacity: 0.5;
+                stroke-opacity: 0.4;
                 fill: none;
                 pointer-events: none;
                 vector-effect: non-scaling-stroke;
@@ -278,6 +278,10 @@
                 <div class="legend-color"></div>
                 <div>Method</div>
             </div>
+            <div class="legend-item" data-group="field">
+                <div class="legend-color"></div>
+                <div>Field</div>
+            </div>
             <div class="legend-item" data-group="const">
                 <div class="legend-color"></div>
                 <div>Const</div>
@@ -361,6 +365,7 @@
                     "func",
                     "type",
                     "method",
+                    "field",
                     "const",
                     "var",
                 ]),
@@ -506,8 +511,11 @@
 
                     if (n.kind === "func" && n.type === "method") {
                         show &&= state.activeGroups.has("method");
+                    } else if (n.kind === "var" && n.type === "field") {
+                        show &&= state.activeGroups.has("field");
+                    } else {
+                        show &&= state.activeGroups.has(n.kind);
                     }
-                    show &&= state.activeGroups.has(n.kind);
 
                     show &&= !state.hiddenNodeIds.has(n.id);
 
@@ -781,16 +789,17 @@
                 const newSelections = new Set();
                 const targetNode = graphData.getNode(nodeId);
 
-                // If selecting a type, also select its methods
+                // If selecting a type, also select its methods and fields
                 if (targetNode && targetNode.kind === "type") {
                     newSelections.add(nodeId);
                     const typeName = targetNode.name;
 
-                    // Find all methods belonging to this type
-                    // Methods have kind="func", type="method", and name starts with "TypeName."
-                    // or id contains "(*pkg.TypeName)." or "(pkg.TypeName)."
+                    // Find all methods and fields belonging to this type
                     graphData.nodes.forEach((n) => {
-                        if (n.kind === "func" && n.type === "method") {
+                        if (
+                            (n.kind === "func" && n.type === "method") ||
+                            (n.kind === "var" && n.type === "field")
+                        ) {
                             // Check if method name starts with TypeName.
                             if (n.name.startsWith(typeName + ".")) {
                                 newSelections.add(n.id);
@@ -918,7 +927,6 @@
             }
 
             function setupEventListeners() {
-                // Legend filtering
                 document
                     .querySelectorAll(".legend-item[data-group]")
                     .forEach((item) => {
@@ -936,7 +944,6 @@
                         });
                     });
 
-                // Search with debouncing
                 let searchTimeout;
                 document
                     .getElementById("search-box")
@@ -947,7 +954,6 @@
                         }, 150);
                     });
 
-                // Controls
                 document
                     .getElementById("show-labels")
                     .addEventListener("change", (e) => {
@@ -1215,11 +1221,9 @@
                 }
             }
 
-            // Make handleNodeClick globally accessible
             window.handleNodeClick = handleNodeClick;
             window.toggleNodeVisibility = toggleNodeVisibility;
 
-            // Initialize on load
             init();
         </script>
     </body>

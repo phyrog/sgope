@@ -22,9 +22,13 @@ const (
 	typeInterface = "interface"
 	typeBasic     = "basic"
 	typeFunc      = "func"
+	typeName      = "name"
 
 	funcMethod = "method"
 	funcBasic  = "func"
+
+	varBasic = "basic"
+	varField = "field"
 )
 
 type Graph struct {
@@ -90,6 +94,17 @@ type Link struct {
 	To   string `json:"to"`
 }
 
+type linkSet map[string]map[string]bool
+
+func (ls linkSet) Insert(from, to string) {
+	m := ls[from]
+	if m == nil {
+		m = make(map[string]bool)
+		ls[from] = m
+	}
+	m[to] = true
+}
+
 func analyzePackages(paths ...string) (*Graph, error) {
 	cfg := &packages.Config{
 		// Tests: true,
@@ -115,8 +130,9 @@ func analyzePackages(paths ...string) (*Graph, error) {
 		}
 	}
 
-	links := make(map[string]map[string]bool)
+	links := make(linkSet)
 
+	// Collect usage links
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
 			ast.Inspect(file, func(n ast.Node) bool {
@@ -125,15 +141,29 @@ func analyzePackages(paths ...string) (*Graph, error) {
 					return true
 				}
 
+				if e, ok := n.(*ast.SelectorExpr); ok {
+					if refObj := pkg.TypesInfo.Uses[e.Sel]; refObj != nil {
+						xType := pkg.TypesInfo.TypeOf(e.X)
+						if ptr, ok := xType.(*types.Pointer); ok {
+							xType = ptr.Elem()
+						}
+						named, ok := xType.(*types.Named)
+						if ok {
+							xType = named.Underlying()
+							_, ok = xType.(*types.Struct)
+							if ok {
+								if refEntity := graph.Nodes[id(named.Obj())]; refEntity != nil {
+									links.Insert(parentNode.Id, "("+refEntity.Id+")."+refObj.Name())
+								}
+							}
+						}
+					}
+				}
+
 				if ident, ok := n.(*ast.Ident); ok {
 					if refObj := pkg.TypesInfo.Uses[ident]; refObj != nil {
 						if refEntity := graph.Nodes[id(refObj)]; refEntity != nil {
-							m := links[parentNode.Id]
-							if m == nil {
-								m = make(map[string]bool)
-								links[parentNode.Id] = m
-							}
-							m[refEntity.Id] = true
+							links.Insert(parentNode.Id, refEntity.Id)
 						}
 					}
 				}
@@ -144,22 +174,37 @@ func analyzePackages(paths ...string) (*Graph, error) {
 
 	for _, node := range graph.Nodes {
 		if named, ok := node.obj.Type().(*types.Named); ok {
-			if iface, ok := named.Underlying().(*types.Interface); ok {
-				for method := range iface.ExplicitMethods() {
-					graph.Links = append(graph.Links, Link{From: id(method), To: node.Id})
-				}
-				for embedded := range iface.EmbeddedTypes() {
-					graph.Links = append(graph.Links, Link{From: node.Id, To: embedded.String()})
-				}
-			}
 			for method := range named.Methods() {
-				graph.Links = append(graph.Links, Link{From: id(method), To: node.Id})
+				links.Insert(id(method), node.Id)
+			}
+			switch u := named.Underlying().(type) {
+			case *types.Interface:
+				for method := range u.ExplicitMethods() {
+					links.Insert(id(method), node.Id)
+				}
+				for embedded := range u.EmbeddedTypes() {
+					embeddedId := embedded.String()
+					if _, ok := graph.Nodes[embeddedId]; !ok {
+						continue
+					}
+					links.Insert(node.Id, embeddedId)
+				}
+			case *types.Struct:
+				for field := range u.Fields() {
+					links.Insert("("+node.Id+")."+field.Name(), node.Id)
+				}
 			}
 		}
 	}
 
 	for from, v := range links {
+		if _, ok := graph.Nodes[from]; !ok {
+			continue
+		}
 		for to := range v {
+			if _, ok := graph.Nodes[to]; !ok {
+				continue
+			}
 			graph.Links = append(graph.Links, Link{From: from, To: to})
 		}
 	}
@@ -177,6 +222,10 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 		switch u := t.Type().Underlying().(type) {
 		case *types.Struct:
 			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeStruct, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
+
+			for field := range u.Fields() {
+				nodes = append(nodes, Node{obj: field, pkg: pkg, Kind: kindVar, Type: varField, Id: "(" + id(t) + ")." + field.Name(), LocalName: t.Name() + "." + field.Name(), Pkg: obj.Pkg().Path()})
+			}
 		case *types.Interface:
 			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeInterface, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
 
@@ -187,6 +236,8 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeBasic, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
 		case *types.Signature:
 			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeFunc, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
+		default:
+			nodes = append(nodes, Node{obj: obj, pkg: pkg, Kind: kindType, Type: typeName, Id: id(t), LocalName: t.Name(), Pkg: obj.Pkg().Path()})
 		}
 
 		if named, ok := t.Type().(*types.Named); ok {
@@ -198,19 +249,10 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 	case *types.Const:
 		return []Node{{obj: obj, pkg: pkg, Kind: kindConst, Id: t.Id(), LocalName: t.Name(), Pkg: obj.Pkg().Path()}}
 	case *types.Var:
-		return []Node{{obj: obj, pkg: pkg, Kind: kindVar, Id: t.Id(), LocalName: t.Name(), Pkg: obj.Pkg().Path()}}
+		return []Node{{obj: obj, pkg: pkg, Kind: kindVar, Type: varBasic, Id: t.Id(), LocalName: t.Name(), Pkg: obj.Pkg().Path()}}
 	}
 
 	return nil
-}
-
-func ifaceMethodId(obj types.Object, iface types.Object) string {
-	pkgPath := ""
-	if obj.Pkg() != nil {
-		pkgPath = obj.Pkg().Path()
-	}
-	typeName := iface.Name()
-	return fmt.Sprintf("(%s.%s).%s", pkgPath, typeName, obj.Name())
 }
 
 func id(obj types.Object) string {
@@ -233,24 +275,4 @@ func id(obj types.Object) string {
 		return obj.Name()
 	}
 	return pkgPath + "." + obj.Name()
-}
-
-func elem(t types.Type) types.Type {
-	switch tt := t.(type) {
-	case *types.Pointer:
-		return elem(tt.Elem())
-	case *types.Chan:
-		return elem(tt.Elem())
-	case *types.Array:
-		return elem(tt.Elem())
-	default:
-		return t
-	}
-}
-
-func nodeContains(parent, child ast.Node) bool {
-	if parent == nil || child == nil {
-		return false
-	}
-	return parent.Pos() <= child.Pos() && child.End() <= parent.End()
 }
