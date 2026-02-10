@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
@@ -92,6 +93,7 @@ type Node struct {
 	Id        string `json:"id"`
 	LocalName string `json:"name"`
 	Parent    string `json:"parent,omitempty"`
+	Test      bool   `json:"test,omitempty"`
 	obj       types.Object
 	pkg       *packages.Package
 }
@@ -114,8 +116,8 @@ func (ls linkSet) Insert(from, to string) {
 
 func analyzePackages(paths ...string) (*Graph, error) {
 	cfg := &packages.Config{
-		// Tests: true,
-		Mode: packages.NeedName | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Tests: true,
+		Mode:  packages.NeedName | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
 	}
 	pkgs, err := packages.Load(cfg, paths...)
 	if err != nil {
@@ -127,6 +129,9 @@ func analyzePackages(paths ...string) (*Graph, error) {
 
 	// Collect nodes
 	for _, pkg := range pkgs {
+		if strings.HasSuffix(pkg.PkgPath, ".test") {
+			continue
+		}
 		scope := pkg.Types.Scope()
 		for _, name := range scope.Names() {
 			obj := scope.Lookup(name)
@@ -177,6 +182,7 @@ func analyzePackages(paths ...string) (*Graph, error) {
 		}
 	}
 
+	// Collect method and field links
 	for _, node := range graph.Nodes {
 		if named, ok := node.obj.Type().(*types.Named); ok {
 			for method := range named.Methods() {
@@ -224,6 +230,9 @@ func analyzePackages(paths ...string) (*Graph, error) {
 }
 
 func objNodes(pkg *packages.Package, obj types.Object) []Node {
+	filename := pkg.Fset.Position(obj.Pos()).Filename
+	pkgName := pkg.Name
+	isTest := strings.HasSuffix(filename, "_test.go") || strings.HasSuffix(pkgName, "_test")
 	switch t := obj.(type) {
 	case *types.Func:
 		return []Node{{
@@ -234,6 +243,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			Id:        id(t),
 			LocalName: t.Name(),
 			Pkg:       obj.Pkg().Path(),
+			Test:      isTest,
 		}}
 	case *types.TypeName:
 		var nodes []Node
@@ -249,6 +259,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Test:      isTest,
 			}
 			nodes = append(nodes, node)
 
@@ -262,6 +273,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Parent:    node.Id,
 					LocalName: t.Name() + "." + field.Name(),
 					Pkg:       obj.Pkg().Path(),
+					Test:      isTest,
 				})
 			}
 		// type foo interface{}
@@ -274,6 +286,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Test:      isTest,
 			}
 			nodes = append(nodes, node)
 
@@ -287,6 +300,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Parent:    node.Id,
 					LocalName: t.Name() + "." + method.Name(),
 					Pkg:       obj.Pkg().Path(),
+					Test:      isTest,
 				})
 			}
 		// type foo bar
@@ -299,6 +313,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Test:      isTest,
 			})
 		case *types.Signature:
 			nodes = append(nodes, Node{
@@ -309,6 +324,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Test:      isTest,
 			})
 		default:
 			nodes = append(nodes, Node{
@@ -319,6 +335,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Test:      isTest,
 			})
 		}
 
@@ -333,6 +350,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Parent:    named.String(),
 					LocalName: t.Name() + "." + method.Name(),
 					Pkg:       obj.Pkg().Path(),
+					Test:      isTest,
 				})
 			}
 		}
@@ -345,6 +363,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			Id:        t.Id(),
 			LocalName: t.Name(),
 			Pkg:       obj.Pkg().Path(),
+			Test:      isTest,
 		}}
 	case *types.Var:
 		return []Node{{
@@ -355,6 +374,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			Id:        t.Id(),
 			LocalName: t.Name(),
 			Pkg:       obj.Pkg().Path(),
+			Test:      isTest,
 		}}
 	}
 

@@ -266,6 +266,10 @@
 
         <div class="legend">
             <div><strong>Node Types</strong></div>
+            <div class="legend-item" data-group="test">
+                <div class="legend-color"></div>
+                <div>Test</div>
+            </div>
             <div class="legend-item" data-group="func">
                 <div class="legend-color"></div>
                 <div>Function</div>
@@ -362,6 +366,7 @@
             const state = {
                 selectedNodeIds: new Set(),
                 activeGroups: new Set([
+                    "test",
                     "func",
                     "type",
                     "method",
@@ -509,6 +514,10 @@
                 const filteredNodes = graphData.nodes.filter((n) => {
                     let show = true;
 
+                    if (n.test) {
+                        show &&= state.activeGroups.has("test");
+                    }
+
                     if (n.kind === "func" && n.type === "method") {
                         show &&= state.activeGroups.has("method");
                     } else if (n.kind === "var" && n.type === "field") {
@@ -522,6 +531,8 @@
                     return show;
                 });
                 const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
+
+                console.log("Node count:", filteredNodes.length);
 
                 // Helper function to find visible parent node or return null
                 const findVisibleNode = (nodeId) => {
@@ -575,6 +586,8 @@
                         }
                     }
                 });
+
+                console.log("Link count:", filteredLinks.length);
 
                 // Apply package clustering force
                 if (state.clusterStrength > 0) {
