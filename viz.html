@@ -522,11 +522,59 @@
                     return show;
                 });
                 const filteredNodeIds = new Set(filteredNodes.map((n) => n.id));
-                const filteredLinks = graphData.links.filter(
-                    (l) =>
-                        filteredNodeIds.has(l.from) &&
-                        filteredNodeIds.has(l.to),
-                );
+
+                // Helper function to find visible parent node or return null
+                const findVisibleNode = (nodeId) => {
+                    let current = nodeId;
+                    const visited = new Set();
+
+                    while (current && !filteredNodeIds.has(current)) {
+                        if (visited.has(current)) {
+                            // Circular reference, bail out
+                            return null;
+                        }
+                        visited.add(current);
+
+                        const node = graphData.nodeById.get(current);
+                        if (
+                            node &&
+                            node.parent &&
+                            graphData.nodeById.has(node.parent)
+                        ) {
+                            current = node.parent;
+                        } else {
+                            return null;
+                        }
+                    }
+
+                    return filteredNodeIds.has(current) ? current : null;
+                };
+
+                // Redirect links through parent nodes when endpoints are hidden
+                const filteredLinks = [];
+                const linkKeys = new Set();
+
+                graphData.links.forEach((l) => {
+                    let from = l.from;
+                    let to = l.to;
+
+                    // Redirect endpoints to visible nodes if needed
+                    if (!filteredNodeIds.has(from)) {
+                        from = findVisibleNode(from);
+                    }
+                    if (!filteredNodeIds.has(to)) {
+                        to = findVisibleNode(to);
+                    }
+
+                    // Only include link if both endpoints are visible and link doesn't already exist
+                    if (from && to) {
+                        const linkKey = `${from}-${to}`;
+                        if (!linkKeys.has(linkKey)) {
+                            linkKeys.add(linkKey);
+                            filteredLinks.push({ ...l, from, to });
+                        }
+                    }
+                });
 
                 // Apply package clustering force
                 if (state.clusterStrength > 0) {
