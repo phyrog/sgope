@@ -649,7 +649,14 @@
                     .append("circle")
                     .attr("class", "node")
                     .attr("r", (d) => getNodeRadius(d))
-                    .attr("fill", (d) => color(d.kind) || "#999")
+                    .attr("fill", (d) => {
+                        if (d.kind == "func" && d.type == "method") {
+                            return color("method");
+                        } else if (d.kind == "var" && d.type == "field") {
+                            return color("field");
+                        }
+                        return color(d.kind) || "#999";
+                    })
                     .attr("cx", (d) => d.x || width / 2)
                     .attr("cy", (d) => d.y || height / 2)
                     .call(
