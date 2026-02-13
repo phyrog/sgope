@@ -5,7 +5,6 @@
         <meta charset="utf-8" />
         <title>sgope</title>
         <script src="https://d3js.org/d3.v7.min.js"></script>
-        <script type="module" src="https://esm.sh/d3-force-webgpu"></script>
         <style id="graph-styles">
             body {
                 margin: 0;
@@ -224,6 +223,16 @@
                     max="-50"
                     value="-1050"
             /></label>
+            <label
+                >Pkg Cluster:
+                <input
+                    type="range"
+                    id="pkg-cluster-strength"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value="0.3"
+            /></label>
             <button id="fit-selection">Fit Selection</button>
             <button id="reset-focus">Reset Focus</button>
             <button id="export-png">Export PNG</button>
@@ -286,7 +295,9 @@
             <canvas id="graph"></canvas>
         </div>
 
-        <script>
+        <script type="module">
+            import * as d3ForceWebgpu from "https://esm.sh/d3-force-webgpu";
+
             const data = DATA_PLACEHOLDER;
 
             // Color scheme
@@ -365,6 +376,7 @@
                 showLabels: true,
                 linkDistance: 200,
                 charge: -300,
+                pkgClusterStrength: 0.1,
                 hiddenNodeIds: new Set(),
                 webgpuEnabled: false,
                 transform: { x: 0, y: 0, k: 1 },
@@ -517,58 +529,26 @@
             }
 
             async function setupSimulation() {
-                // Use d3ForceWebgpu if available (has built-in CPU fallback)
-                // Otherwise fall back to regular d3
-                if (window.d3ForceWebgpu) {
-                    simulation = await d3ForceWebgpu
-                        .forceSimulation()
-                        .force(
-                            "link",
-                            d3ForceWebgpu
-                                .forceLink()
-                                .id((d) => d.id)
-                                .distance(state.linkDistance),
-                        )
-                        .force(
-                            "charge",
-                            d3ForceWebgpu
-                                .forceManyBody()
-                                .strength(state.charge),
-                        )
-                        .force(
-                            "center",
-                            d3ForceWebgpu.forceCenter(width / 2, height / 2),
-                        )
-                        .force(
-                            "x",
-                            d3ForceWebgpu.forceX(width / 2).strength(0.01),
-                        )
-                        .force(
-                            "y",
-                            d3ForceWebgpu.forceY(height / 2).strength(0.01),
-                        )
-                        .stop(); // Stop automatic ticking
-                } else {
-                    // Fallback to regular d3 if d3ForceWebgpu isn't loaded
-                    console.warn("d3-force-webgpu not available, using d3");
-                    simulation = d3
-                        .forceSimulation()
-                        .force(
-                            "link",
-                            d3
-                                .forceLink()
-                                .id((d) => d.id)
-                                .distance(state.linkDistance),
-                        )
-                        .force(
-                            "charge",
-                            d3.forceManyBody().strength(state.charge),
-                        )
-                        .force("center", d3.forceCenter(width / 2, height / 2))
-                        .force("x", d3.forceX(width / 2).strength(0.01))
-                        .force("y", d3.forceY(height / 2).strength(0.01))
-                        .stop(); // Stop automatic ticking
-                }
+                simulation = await d3ForceWebgpu
+                    .forceSimulation()
+                    .force(
+                        "link",
+                        d3ForceWebgpu
+                            .forceLink()
+                            .id((d) => d.id)
+                            .distance(state.linkDistance),
+                    )
+                    .force(
+                        "charge",
+                        d3ForceWebgpu.forceManyBody().strength(state.charge),
+                    )
+                    .force(
+                        "center",
+                        d3ForceWebgpu.forceCenter(width / 2, height / 2),
+                    )
+                    .force("x", d3ForceWebgpu.forceX(width / 2).strength(0.01))
+                    .force("y", d3ForceWebgpu.forceY(height / 2).strength(0.01))
+                    .stop(); // Stop automatic ticking
 
                 // Start manual simulation loop
                 startSimulationLoop();
@@ -702,7 +682,7 @@
                                 strokeStyle = "#ff6b6b";
                             }
                         } else {
-                            opacity = 0.2 * baseOpacity;
+                            opacity = 0.3 * baseOpacity;
                         }
                     }
 
@@ -1018,7 +998,73 @@
                 }));
 
                 simulation.nodes(filteredNodes);
-                simulation.force("link").links(d3Links);
+
+                // Apply package-aware link strength
+                simulation
+                    .force("link")
+                    .links(d3Links)
+                    .strength((link) => {
+                        if (state.pkgClusterStrength === 0) {
+                            return 1.0; // Normal strength when clustering disabled
+                        }
+
+                        // Get source and target nodes
+                        const sourceNode =
+                            typeof link.source === "object"
+                                ? link.source
+                                : graphData.getNode(link.source);
+                        const targetNode =
+                            typeof link.target === "object"
+                                ? link.target
+                                : graphData.getNode(link.target);
+
+                        if (!sourceNode || !targetNode) return 1.0;
+
+                        // If cross-package link, weaken it based on clustering strength
+                        if (
+                            sourceNode.pkg &&
+                            targetNode.pkg &&
+                            sourceNode.pkg !== targetNode.pkg
+                        ) {
+                            // At max clustering (1.0), cross-package links have near-zero strength
+                            return Math.max(
+                                0.3,
+                                1.0 - state.pkgClusterStrength,
+                            );
+                        }
+
+                        // Same package: full strength
+                        return 1.0;
+                    });
+
+                // Apply package-based repulsion by modifying charge force
+                if (state.pkgClusterStrength > 0) {
+                    // Create a map for quick package lookup
+                    const nodePkgMap = new Map();
+                    filteredNodes.forEach((n) => {
+                        nodePkgMap.set(n.id, n.pkg);
+                    });
+
+                    // Set charge strength based on whether nodes are in same package
+                    simulation.force("charge").strength((source, target) => {
+                        const sourcePkg = nodePkgMap.get(source.id);
+                        const targetPkg = nodePkgMap.get(target.id);
+
+                        // If different packages, apply extra repulsion
+                        if (sourcePkg && targetPkg && sourcePkg !== targetPkg) {
+                            return (
+                                state.charge *
+                                (1 + state.pkgClusterStrength * 2)
+                            );
+                        }
+                        // Same package: normal charge
+                        return state.charge;
+                    });
+                } else {
+                    // No clustering: uniform charge and link strength
+                    simulation.force("charge").strength(state.charge);
+                }
+
                 simulation.alpha(0.3);
 
                 applyHighlighting();
@@ -1263,6 +1309,7 @@
                         const worldPos = screenToWorld(mousePos.x, mousePos.y);
                         draggedNode.fx = worldPos.x;
                         draggedNode.fy = worldPos.y;
+                        updateSimulation();
                     } else if (isPanning && lastMousePos) {
                         const mousePos = getMousePos(event);
                         const dx = mousePos.x - lastMousePos.x;
@@ -1389,8 +1436,7 @@
                     .getElementById("link-distance")
                     .addEventListener("input", (e) => {
                         state.linkDistance = +e.target.value;
-                        simulation.force("link").distance(state.linkDistance);
-                        simulation.alpha(0.3);
+                        updateSimulation(); // Rebuild to update clustering link distances
                         updateURL();
                     });
 
@@ -1400,6 +1446,14 @@
                         state.charge = +e.target.value;
                         simulation.force("charge").strength(state.charge);
                         simulation.alpha(0.3);
+                        updateURL();
+                    });
+
+                document
+                    .getElementById("pkg-cluster-strength")
+                    .addEventListener("input", (e) => {
+                        state.pkgClusterStrength = +e.target.value;
+                        updateSimulation(); // Rebuild links with new clustering
                         updateURL();
                     });
 
@@ -1540,6 +1594,7 @@
                 params.set("labels", state.showLabels);
                 params.set("dist", state.linkDistance);
                 params.set("charge", state.charge);
+                params.set("pkgCluster", state.pkgClusterStrength);
                 params.set("zoom", state.transform.k.toFixed(3));
                 params.set("x", state.transform.x.toFixed(2));
                 params.set("y", state.transform.y.toFixed(2));
@@ -1595,6 +1650,12 @@
                     if (simulation) {
                         simulation.force("charge").strength(state.charge);
                     }
+                }
+
+                if (params.has("pkgCluster")) {
+                    state.pkgClusterStrength = +params.get("pkgCluster");
+                    document.getElementById("pkg-cluster-strength").value =
+                        state.pkgClusterStrength;
                 }
 
                 if (params.has("zoom")) {
