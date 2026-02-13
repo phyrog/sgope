@@ -5,6 +5,7 @@
         <meta charset="utf-8" />
         <title>sgope</title>
         <script src="https://d3js.org/d3.v7.min.js"></script>
+        <script type="module" src="https://esm.sh/d3-force-webgpu"></script>
         <style id="graph-styles">
             body {
                 margin: 0;
@@ -18,11 +19,21 @@
                 height: 100vh;
                 box-sizing: border-box;
             }
-            #graph {
+            #graph-container {
                 border: 1px solid #444;
                 background: #222;
                 width: 100%;
                 flex-grow: 1;
+                position: relative;
+                cursor: grab;
+            }
+            #graph-container:active {
+                cursor: grabbing;
+            }
+            #graph {
+                display: block;
+                width: 100%;
+                height: 100%;
             }
             .controls {
                 margin-bottom: 20px;
@@ -34,55 +45,20 @@
                 flex-wrap: wrap;
                 gap: 15px;
             }
-            .node {
-                cursor: pointer;
-                stroke: #fff7;
-                stroke-width: 1.5px;
-                transition: opacity 0.2s;
-                vector-effect: non-scaling-stroke;
+            .webgpu-status {
+                padding: 5px 10px;
+                background: #333;
+                border-radius: 3px;
+                font-size: 12px;
+                margin-left: auto;
             }
-            .node.selected {
-                stroke: #fff;
-                stroke-width: 2px;
-                filter: drop-shadow(0 0 4px #fff);
+            .webgpu-status.enabled {
+                background: #2d5f2d;
+                color: #7fff7f;
             }
-            .link {
-                stroke: #fff;
-                stroke-opacity: 0.4;
-                fill: none;
-                pointer-events: none;
-                vector-effect: non-scaling-stroke;
-            }
-            .link.cross-package {
-                stroke-dasharray: 4, 4;
-            }
-            .highlight {
-                stroke-opacity: 0.8;
-            }
-            .muted {
-                stroke-opacity: 0.2;
-            }
-            .node.muted,
-            .node-label.muted {
-                filter: brightness(50%);
-            }
-            .highlight.out {
-                stroke: #4ecdc4 !important;
-                stroke-width: 2px !important;
-            }
-            .highlight.in {
-                stroke: #ff6b6b !important;
-                stroke-width: 2px !important;
-            }
-            .highlight.internal {
-                stroke: #ffffff !important;
-                stroke-width: 2px !important;
-            }
-            .node-label {
-                font-size: 10px;
-                pointer-events: none;
-                fill: #fff;
-                text-shadow: #000 0 0 1em;
+            .webgpu-status.disabled {
+                background: #5f2d2d;
+                color: #ff7f7f;
             }
             .legend {
                 position: fixed;
@@ -92,6 +68,7 @@
                 padding: 15px;
                 border-radius: 5px;
                 border: 1px solid #444;
+                z-index: 999;
             }
             .legend-item {
                 margin: 5px 0;
@@ -108,7 +85,6 @@
                 width: 12px;
                 height: 12px;
                 margin-right: 10px;
-                border-radius: 50%;
             }
             .info {
                 position: fixed;
@@ -122,6 +98,7 @@
                 max-height: 70vh;
                 display: flex;
                 flex-direction: column;
+                z-index: 999;
             }
             .sidebar-scroll {
                 flex-grow: 1;
@@ -247,19 +224,24 @@
                     max="-50"
                     value="-1050"
             /></label>
-            <label
-                >Cluster:
-                <input
-                    type="range"
-                    id="cluster-strength"
-                    min="0.1"
-                    max="1"
-                    step="0.05"
-                    value="0.2"
-            /></label>
             <button id="fit-selection">Fit Selection</button>
-            <button id="reset-focus">Reset Focus</button
-            ><button id="export-svg">Export SVG</button>
+            <button id="reset-focus">Reset Focus</button>
+            <button id="export-png">Export PNG</button>
+            <div class="webgpu-status" id="webgpu-status">
+                Checking WebGPU...
+            </div>
+            <div
+                style="
+                    padding: 5px 10px;
+                    background: #333;
+                    border-radius: 3px;
+                    font-size: 12px;
+                    margin-left: 10px;
+                "
+            >
+                <span id="fps-display">FPS: --</span> |
+                <span id="sim-steps-display">Sim: -- steps/s</span>
+            </div>
         </div>
 
         <div class="info">
@@ -300,7 +282,9 @@
             </div>
         </div>
 
-        <svg id="graph"></svg>
+        <div id="graph-container">
+            <canvas id="graph"></canvas>
+        </div>
 
         <script>
             const data = DATA_PLACEHOLDER;
@@ -381,22 +365,115 @@
                 showLabels: true,
                 linkDistance: 200,
                 charge: -300,
-                clusterStrength: 0.3,
                 hiddenNodeIds: new Set(),
+                webgpuEnabled: false,
+                transform: { x: 0, y: 0, k: 1 },
+                labelCache: new Map(),
             };
 
-            let graphData, simulation, svg, g, link, node, label, zoom;
+            let graphData, simulation;
+            let canvas, ctx, container;
             let width, height;
             let renderScheduled = false;
+            let rafId = null;
+            let filteredNodes = [];
+            let filteredLinks = [];
+            let highlightState = {
+                outgoingNodes: new Set(),
+                incomingNodes: new Set(),
+            };
 
-            // Debounced render for performance
-            function scheduleRender(callback) {
+            // Performance tracking
+            let fpsFrames = [];
+            let fpsLastUpdate = Date.now();
+            let simSteps = 0;
+            let simStepsLastUpdate = Date.now();
+            let currentFPS = 0;
+            let currentSimSteps = 0;
+
+            // Debounced render for performance - only schedules one render per frame
+            function scheduleRender() {
                 if (!renderScheduled) {
                     renderScheduled = true;
-                    requestAnimationFrame(() => {
-                        callback();
+                    rafId = requestAnimationFrame(() => {
+                        render();
                         renderScheduled = false;
                     });
+                }
+            }
+
+            function cancelScheduledRender() {
+                if (rafId !== null) {
+                    cancelAnimationFrame(rafId);
+                    rafId = null;
+                    renderScheduled = false;
+                }
+            }
+
+            function updatePerformanceStats() {
+                const now = Date.now();
+
+                // Update FPS
+                fpsFrames.push(now);
+                fpsFrames = fpsFrames.filter((t) => now - t < 1000);
+
+                if (now - fpsLastUpdate >= 200) {
+                    currentFPS = fpsFrames.length;
+                    fpsLastUpdate = now;
+                    document.getElementById("fps-display").textContent =
+                        `FPS: ${currentFPS}`;
+                }
+
+                // Update simulation steps/sec
+                if (now - simStepsLastUpdate >= 200) {
+                    currentSimSteps = Math.round(
+                        (simSteps * 1000) / (now - simStepsLastUpdate),
+                    );
+                    simSteps = 0;
+                    simStepsLastUpdate = now;
+                    document.getElementById("sim-steps-display").textContent =
+                        `Sim: ${currentSimSteps} steps/s`;
+                }
+            }
+
+            // Check WebGPU availability
+            async function checkWebGPU() {
+                if (!navigator.gpu) {
+                    console.warn("WebGPU not supported, falling back to CPU");
+                    updateWebGPUStatus(false);
+                    return false;
+                }
+
+                try {
+                    const adapter = await navigator.gpu.requestAdapter();
+                    if (!adapter) {
+                        console.warn(
+                            "No WebGPU adapter found, falling back to CPU",
+                        );
+                        updateWebGPUStatus(false);
+                        return false;
+                    }
+                    console.log(
+                        "WebGPU is available and will be used for physics simulation",
+                    );
+                    updateWebGPUStatus(true);
+                    return true;
+                } catch (err) {
+                    console.warn("WebGPU error:", err, "falling back to CPU");
+                    updateWebGPUStatus(false);
+                    return false;
+                }
+            }
+
+            function updateWebGPUStatus(enabled) {
+                state.webgpuEnabled = enabled;
+                const statusEl = document.getElementById("webgpu-status");
+                if (enabled) {
+                    statusEl.textContent = "🚀 WebGPU Enabled";
+                    statusEl.className = "webgpu-status enabled";
+                } else {
+                    statusEl.textContent = "⚠️ CPU Fallback";
+                    statusEl.className = "webgpu-status disabled";
                 }
             }
 
@@ -404,77 +481,97 @@
             async function init() {
                 graphData = new GraphData(data);
 
-                setupSVG();
-                setupSimulation();
+                // Check WebGPU support
+                await checkWebGPU();
+
+                setupCanvas();
+                await setupSimulation();
                 loadFromURL();
                 updateGraph();
                 setupEventListeners();
             }
 
-            function setupSVG() {
-                svg = d3.select("#graph");
-                const bounds = svg.node().getBoundingClientRect();
+            function setupCanvas() {
+                container = document.getElementById("graph-container");
+                canvas = document.getElementById("graph");
+                ctx = canvas.getContext("2d");
+
+                resizeCanvas();
+                window.addEventListener("resize", resizeCanvas);
+            }
+
+            function resizeCanvas() {
+                const bounds = container.getBoundingClientRect();
                 width = bounds.width;
                 height = bounds.height;
 
-                const styleSheet =
-                    document.getElementById("graph-styles").sheet;
+                // Set canvas size with device pixel ratio for crisp rendering
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width = width * dpr;
+                canvas.height = height * dpr;
+                canvas.style.width = width + "px";
+                canvas.style.height = height + "px";
+                ctx.scale(dpr, dpr);
 
-                zoom = d3
-                    .zoom()
-                    .scaleExtent([0.01, 4])
-                    .on("zoom", (event) => {
-                        g.attr("transform", event.transform);
-
-                        const baseOpacity = Math.min(
-                            1,
-                            Math.max(0.2, event.transform.k),
-                        );
-
-                        for (let i = 0; i < styleSheet.cssRules.length; i++) {
-                            const rule = styleSheet.cssRules[i];
-                            if (rule.selectorText === ".link") {
-                                rule.style.opacity = baseOpacity;
-                            }
-                            if (rule.selectorText === ".node") {
-                                rule.style.opacity = baseOpacity;
-                            }
-                        }
-                    });
-
-                svg.call(zoom);
-                svg.on("click", () => {
-                    resetFocus();
-                });
-
-                g = svg.append("g");
-                // Use separate groups for links and nodes for better rendering
-                g.append("g").attr("class", "links-group");
-                g.append("g").attr("class", "nodes-group");
-                g.append("g").attr("class", "labels-group");
+                scheduleRender();
             }
 
-            function setupSimulation() {
-                simulation = d3
-                    .forceSimulation()
-                    .force(
-                        "link",
-                        d3
-                            .forceLink()
-                            .id((d) => d.id)
-                            .distance(state.linkDistance),
-                    )
-                    .force("charge", d3.forceManyBody().strength(state.charge))
-                    .force("center", d3.forceCenter(width / 2, height / 2))
-                    .force("x", d3.forceX(width / 2).strength(0.01))
-                    .force("y", d3.forceY(height / 2).strength(0.01))
-                    .force(
-                        "collision",
-                        d3.forceCollide().radius(20).strength(1.0),
-                    )
-                    .alphaDecay(0.00688395157)
-                    .on("tick", onTick)
-                    .on("end", () => console.log("Simulation ended"));
+            async function setupSimulation() {
+                // Use d3ForceWebgpu if available (has built-in CPU fallback)
+                // Otherwise fall back to regular d3
+                if (window.d3ForceWebgpu) {
+                    simulation = await d3ForceWebgpu
+                        .forceSimulation()
+                        .force(
+                            "link",
+                            d3ForceWebgpu
+                                .forceLink()
+                                .id((d) => d.id)
+                                .distance(state.linkDistance),
+                        )
+                        .force(
+                            "charge",
+                            d3ForceWebgpu
+                                .forceManyBody()
+                                .strength(state.charge),
+                        )
+                        .force(
+                            "center",
+                            d3ForceWebgpu.forceCenter(width / 2, height / 2),
+                        )
+                        .force(
+                            "x",
+                            d3ForceWebgpu.forceX(width / 2).strength(0.01),
+                        )
+                        .force(
+                            "y",
+                            d3ForceWebgpu.forceY(height / 2).strength(0.01),
+                        )
+                        .stop(); // Stop automatic ticking
+                } else {
+                    // Fallback to regular d3 if d3ForceWebgpu isn't loaded
+                    console.warn("d3-force-webgpu not available, using d3");
+                    simulation = d3
+                        .forceSimulation()
+                        .force(
+                            "link",
+                            d3
+                                .forceLink()
+                                .id((d) => d.id)
+                                .distance(state.linkDistance),
+                        )
+                        .force(
+                            "charge",
+                            d3.forceManyBody().strength(state.charge),
+                        )
+                        .force("center", d3.forceCenter(width / 2, height / 2))
+                        .force("x", d3.forceX(width / 2).strength(0.01))
+                        .force("y", d3.forceY(height / 2).strength(0.01))
+                        .stop(); // Stop automatic ticking
+                }
+
+                // Start manual simulation loop
+                startSimulationLoop();
 
                 // Add error handler
                 window.addEventListener("error", (e) => {
@@ -488,34 +585,340 @@
                 });
             }
 
-            // Optimized tick handler - only update positions, not DOM structure
-            function onTick() {
-                scheduleRender(() => {
-                    if (link) {
-                        link.attr("x1", (d) => d.source.x || 0)
-                            .attr("y1", (d) => d.source.y || 0)
-                            .attr("x2", (d) => d.target.x || 0)
-                            .attr("y2", (d) => d.target.y || 0);
+            let simulationRunning = false;
+            let lastSimTime = 0;
+
+            function startSimulationLoop() {
+                if (simulationRunning) return;
+                simulationRunning = true;
+                lastSimTime = performance.now();
+                runSimulationStep();
+            }
+
+            function runSimulationStep() {
+                if (!simulationRunning) return;
+
+                const now = performance.now();
+                const elapsed = now - lastSimTime;
+                lastSimTime = now;
+
+                // Run simulation tick
+                if (simulation.alpha() > simulation.alphaMin()) {
+                    simulation.tick();
+                    simSteps++;
+
+                    // Only trigger render occasionally to avoid overwhelming the render loop
+                    // This allows simulation to run faster than rendering
+                    if (simSteps % 5 === 0 || elapsed > 16) {
+                        scheduleRender();
+                    }
+                }
+
+                // Use setTimeout instead of requestAnimationFrame to decouple from rendering
+                // This allows the simulation to run as fast as possible
+                setTimeout(runSimulationStep, 0);
+            }
+
+            function stopSimulationLoop() {
+                simulationRunning = false;
+            }
+
+            function render() {
+                updatePerformanceStats();
+
+                ctx.save();
+                ctx.clearRect(0, 0, width, height);
+
+                // Apply transform
+                ctx.translate(state.transform.x, state.transform.y);
+                ctx.scale(state.transform.k, state.transform.k);
+
+                // Calculate opacity based on zoom
+                const baseOpacity = 1;
+
+                // Draw links - batched by style for performance
+                // Group links by their rendering style to minimize state changes
+                const linkBatches = new Map();
+
+                filteredLinks.forEach((link) => {
+                    // Handle both pre-simulation (from/to) and post-simulation (source/target) states
+                    let sourceNode, targetNode, sourceId, targetId;
+
+                    if (
+                        typeof link.source === "object" &&
+                        link.source !== null
+                    ) {
+                        // Post-simulation: source and target are node objects
+                        sourceNode = link.source;
+                        targetNode = link.target;
+                        sourceId = sourceNode.id;
+                        targetId = targetNode.id;
+                    } else {
+                        // Pre-simulation or string IDs: look up nodes by ID
+                        sourceId = link.source || link.from;
+                        targetId = link.target || link.to;
+                        sourceNode = graphData.getNode(sourceId);
+                        targetNode = graphData.getNode(targetId);
                     }
 
-                    if (node) {
-                        node.attr("cx", (d) => d.x || 0).attr(
-                            "cy",
-                            (d) => d.y || 0,
-                        );
+                    if (
+                        !sourceNode ||
+                        !targetNode ||
+                        sourceNode.x === undefined ||
+                        targetNode.x === undefined
+                    ) {
+                        return; // Skip if nodes don't have positions yet
                     }
 
-                    if (label && state.showLabels) {
-                        label
-                            .attr("x", (d) => (d.x || 0) + 8)
-                            .attr("y", (d) => (d.y || 0) + 3);
+                    let opacity = 0.6 * baseOpacity;
+                    let strokeWidth = 1;
+                    let strokeStyle = "#fff";
+                    let isDashed = sourceNode?.pkg !== targetNode?.pkg;
+
+                    // Apply highlighting
+                    if (state.selectedNodeIds.size > 0) {
+                        const isHighlighted =
+                            state.selectedNodeIds.has(sourceId) ||
+                            state.selectedNodeIds.has(targetId);
+
+                        if (isHighlighted) {
+                            opacity = baseOpacity;
+                            strokeWidth = 2;
+
+                            if (
+                                state.selectedNodeIds.has(sourceId) &&
+                                state.selectedNodeIds.has(targetId)
+                            ) {
+                                strokeStyle = "#ffffff";
+                            } else if (
+                                state.selectedNodeIds.has(sourceId) &&
+                                highlightState.outgoingNodes.has(targetId)
+                            ) {
+                                strokeStyle = "#4ecdc4";
+                            } else if (
+                                state.selectedNodeIds.has(targetId) &&
+                                highlightState.incomingNodes.has(sourceId)
+                            ) {
+                                strokeStyle = "#ff6b6b";
+                            }
+                        } else {
+                            opacity = 0.2 * baseOpacity;
+                        }
                     }
+
+                    // Create a batch key for this style combination
+                    const batchKey = `${opacity.toFixed(2)}_${strokeWidth}_${strokeStyle}_${isDashed ? "dash" : "solid"}`;
+
+                    if (!linkBatches.has(batchKey)) {
+                        linkBatches.set(batchKey, {
+                            opacity,
+                            strokeWidth,
+                            strokeStyle,
+                            isDashed,
+                            links: [],
+                        });
+                    }
+
+                    linkBatches.get(batchKey).links.push({
+                        x1: sourceNode.x,
+                        y1: sourceNode.y,
+                        x2: targetNode.x,
+                        y2: targetNode.y,
+                    });
                 });
+
+                // Draw each batch with a single beginPath for all links in that style
+                linkBatches.forEach((batch) => {
+                    ctx.globalAlpha = batch.opacity;
+                    ctx.strokeStyle = batch.strokeStyle;
+                    ctx.lineWidth = batch.strokeWidth;
+                    ctx.setLineDash(batch.isDashed ? [4, 4] : []);
+
+                    ctx.beginPath();
+                    batch.links.forEach((link) => {
+                        ctx.moveTo(link.x1, link.y1);
+                        ctx.lineTo(link.x2, link.y2);
+                    });
+                    ctx.stroke();
+                });
+
+                ctx.setLineDash([]);
+
+                // Draw nodes
+                if (state.transform.k > 0.1) {
+                    filteredNodes.forEach((node) => {
+                        const size = getNodeRadius(node) * 2; // Use radius to determine side length
+                        const offset = size / 2;
+
+                        let fillColor = color(node.kind);
+                        if (node.kind === "func" && node.type === "method") {
+                            fillColor = color("method");
+                        } else if (
+                            node.kind === "var" &&
+                            node.type === "field"
+                        ) {
+                            fillColor = color("field");
+                        }
+
+                        let strokeColor = "rgba(255, 255, 255, 0.47)";
+                        let strokeWidth = 1.5;
+                        let nodeOpacity = baseOpacity;
+
+                        // Apply highlighting
+                        if (state.selectedNodeIds.size > 0) {
+                            if (state.selectedNodeIds.has(node.id)) {
+                                strokeColor = "#fff";
+                                strokeWidth = 2;
+                            } else if (
+                                !highlightState.outgoingNodes.has(node.id) &&
+                                !highlightState.incomingNodes.has(node.id)
+                            ) {
+                                nodeOpacity = baseOpacity * 0.5;
+                            }
+                        }
+
+                        ctx.globalAlpha = nodeOpacity;
+                        ctx.fillStyle = fillColor;
+                        ctx.strokeStyle = strokeColor;
+                        ctx.lineWidth = strokeWidth;
+
+                        // Change: Draw Rect instead of Arc
+                        ctx.fillRect(
+                            node.x - offset,
+                            node.y - offset,
+                            size,
+                            size,
+                        );
+                        ctx.strokeRect(
+                            node.x - offset,
+                            node.y - offset,
+                            size,
+                            size,
+                        );
+
+                        // Draw selection glow
+                        if (
+                            state.selectedNodeIds.size > 0 &&
+                            state.selectedNodeIds.has(node.id)
+                        ) {
+                            ctx.globalAlpha = 0.3;
+                            ctx.strokeStyle = "#fff";
+                            ctx.lineWidth = 4;
+                            // Glow follows the rectangle shape
+                            ctx.strokeRect(
+                                node.x - offset - 2,
+                                node.y - offset - 2,
+                                size + 4,
+                                size + 4,
+                            );
+                        }
+                    });
+                }
+
+                if (state.showLabels && state.transform.k > 0.6) {
+                    // 1. Calculate viewport bounds for culling
+                    const viewLeft = -state.transform.x / state.transform.k;
+                    const viewTop = -state.transform.y / state.transform.k;
+                    const viewRight = viewLeft + width / state.transform.k;
+                    const viewBottom = viewTop + height / state.transform.k;
+
+                    filteredNodes.forEach((node) => {
+                        // View Culling: Skip if off-screen (buffer of 100 units)
+                        if (
+                            node.x < viewLeft - 100 ||
+                            node.x > viewRight ||
+                            node.y < viewTop - 20 ||
+                            node.y > viewBottom
+                        )
+                            return;
+
+                        // 2. Get or Create Cached Label
+                        let cached = state.labelCache.get(node.id);
+                        if (!cached) {
+                            const labelCanvas =
+                                document.createElement("canvas");
+                            const lCtx = labelCanvas.getContext("2d");
+                            const baseFontSize = 20;
+                            lCtx.font = `${baseFontSize}px Arial`;
+                            const metrics = lCtx.measureText(node.name);
+
+                            const padding = 4;
+                            labelCanvas.width = metrics.width + padding * 2;
+                            labelCanvas.height = baseFontSize * 1.2;
+
+                            // Draw background rectangle
+                            lCtx.fillStyle = "rgba(0, 0, 0, 0.7)";
+                            lCtx.fillRect(
+                                0,
+                                0,
+                                labelCanvas.width,
+                                labelCanvas.height,
+                            );
+
+                            // Draw text
+                            lCtx.font = `${baseFontSize}px Arial`;
+                            lCtx.textBaseline = "middle";
+                            lCtx.fillStyle = "#ffffff";
+                            lCtx.fillText(
+                                node.name,
+                                padding,
+                                labelCanvas.height / 2,
+                            );
+
+                            cached = {
+                                canvas: labelCanvas,
+                                width: labelCanvas.width,
+                                height: labelCanvas.height,
+                            };
+                            state.labelCache.set(node.id, cached);
+                        }
+
+                        // 3. Scale label based on node size and position outside node boundary
+                        const nodeRadius = getNodeRadius(node);
+                        // Scale label proportionally to node size (larger nodes get larger labels)
+                        const labelScale = Math.max(
+                            0.5,
+                            Math.min(1.5, nodeRadius / 8),
+                        );
+                        const worldHeight = 10 * labelScale;
+                        const worldWidth =
+                            (cached.width / cached.height) * worldHeight;
+
+                        let textOpacity = baseOpacity;
+                        if (state.selectedNodeIds.size > 0) {
+                            if (
+                                !state.selectedNodeIds.has(node.id) &&
+                                !highlightState.outgoingNodes.has(node.id) &&
+                                !highlightState.incomingNodes.has(node.id)
+                            ) {
+                                textOpacity = baseOpacity * 0.3;
+                            }
+                        }
+
+                        ctx.globalAlpha = textOpacity;
+
+                        // Position label outside the node boundary
+                        // For square nodes, position it at the right edge + small gap
+                        const nodeSize = nodeRadius * 2;
+                        const labelX = node.x + nodeSize / 2 + 2;
+
+                        // Stamping the cache onto the main canvas
+                        ctx.drawImage(
+                            cached.canvas,
+                            labelX,
+                            node.y - worldHeight / 2, // Center vertically relative to node
+                            worldWidth,
+                            worldHeight,
+                        );
+                    });
+                }
+
+                ctx.restore();
             }
 
             function updateGraph() {
                 // Filter nodes and links based on active groups
-                const filteredNodes = graphData.nodes.filter((n) => {
+                filteredNodes = graphData.nodes.filter((n) => {
                     let show = true;
 
                     if (n.test) {
@@ -545,7 +948,6 @@
 
                     while (current && !filteredNodeIds.has(current)) {
                         if (visited.has(current)) {
-                            // Circular reference, bail out
                             return null;
                         }
                         visited.add(current);
@@ -566,14 +968,13 @@
                 };
 
                 // Redirect links through parent nodes when endpoints are hidden
-                const filteredLinks = [];
+                filteredLinks = [];
                 const linkKeys = new Set();
 
                 graphData.links.forEach((l) => {
                     let from = l.from;
                     let to = l.to;
 
-                    // Redirect endpoints to visible nodes if needed
                     if (!filteredNodeIds.has(from)) {
                         from = findVisibleNode(from);
                     }
@@ -581,7 +982,6 @@
                         to = findVisibleNode(to);
                     }
 
-                    // Only include link if both endpoints are visible and link doesn't already exist
                     if (from && to) {
                         const linkKey = `${from}-${to}`;
                         if (!linkKeys.has(linkKey)) {
@@ -593,74 +993,14 @@
 
                 console.log("Link count:", filteredLinks.length);
 
-                // Apply package clustering force
-                if (state.clusterStrength > 0) {
-                    const packageCenters = computePackageCenters(filteredNodes);
-
-                    // Custom clustering force that attracts nodes to package centers
-                    // and repels nodes from other packages
-                    const clusterForce = () => {
-                        const strength = state.clusterStrength;
-                        const alpha = simulation.alpha();
-
-                        filteredNodes.forEach((node) => {
-                            if (!node.pkg) return;
-
-                            const center = packageCenters.get(node.pkg);
-                            if (!center) return;
-
-                            // Attract to own package center
-                            const dx = center.x - node.x;
-                            const dy = center.y - node.y;
-                            node.vx += dx * strength * alpha * 0.1;
-                            node.vy += dy * strength * alpha * 0.1;
-
-                            // Repel from other package centers
-                            packageCenters.forEach((otherCenter, otherPkg) => {
-                                if (otherPkg === node.pkg) return;
-
-                                const dx = node.x - otherCenter.x;
-                                const dy = node.y - otherCenter.y;
-                                const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                                const repelStrength =
-                                    (strength * 800) / (dist * dist);
-
-                                node.vx += (dx / dist) * repelStrength * alpha;
-                                node.vy += (dy / dist) * repelStrength * alpha;
-                            });
-                        });
-                    };
-
-                    simulation.force("cluster", clusterForce);
-                } else {
-                    // Remove clustering force if strength is 0
-                    simulation.force("cluster", null);
-                }
-
-                renderGraph(filteredNodes, filteredLinks);
+                state.labelCache.clear();
+                updateSimulation();
                 updateSidebar();
             }
 
-            function computePackageCenters(nodes) {
-                const packages = Array.from(graphData.packageGroups.keys());
-                const centers = new Map();
-                const angleStep = (2 * Math.PI) / packages.length;
-                const radius = Math.min(width, height) * 3.5; // Increased radius
-
-                packages.forEach((pkg, i) => {
-                    const angle = i * angleStep;
-                    centers.set(pkg, {
-                        x: width / 2 + radius * Math.cos(angle),
-                        y: height / 2 + radius * Math.sin(angle),
-                    });
-                });
-
-                return centers;
-            }
-
-            function renderGraph(nodes, links) {
+            function updateSimulation() {
                 // Initialize node positions if not set
-                nodes.forEach((node) => {
+                filteredNodes.forEach((node) => {
                     if (node.x === undefined) {
                         node.x = width / 2 + (Math.random() - 0.5) * 100;
                     }
@@ -669,96 +1009,17 @@
                     }
                 });
 
-                // Convert links to D3 format (source, target instead of from, to)
-                const d3Links = links.map((l) => ({
+                // Convert links to D3 format
+                const d3Links = filteredLinks.map((l) => ({
                     source: l.from,
                     target: l.to,
                     from: l.from,
                     to: l.to,
                 }));
 
-                // Update links
-                const linkGroup = g.select(".links-group");
-                link = linkGroup
-                    .selectAll("line")
-                    .data(d3Links, (d) => `${d.from}-${d.to}`);
-
-                link.exit().remove();
-
-                const linkEnter = link
-                    .enter()
-                    .append("line")
-                    .attr("class", (d) => {
-                        const sourceNode = graphData.getNode(d.from);
-                        const targetNode = graphData.getNode(d.to);
-                        return sourceNode?.pkg === targetNode?.pkg
-                            ? "link"
-                            : "link cross-package";
-                    })
-                    .attr("stroke-width", 1)
-                    .attr("x1", 0)
-                    .attr("y1", 0)
-                    .attr("x2", 0)
-                    .attr("y2", 0);
-
-                link = linkEnter.merge(link);
-
-                // Update nodes
-                const nodeGroup = g.select(".nodes-group");
-                node = nodeGroup.selectAll("circle").data(nodes, (d) => d.id);
-
-                node.exit().remove();
-
-                const nodeEnter = node
-                    .enter()
-                    .append("circle")
-                    .attr("class", "node")
-                    .attr("r", (d) => getNodeRadius(d))
-                    .attr("fill", (d) => {
-                        if (d.kind == "func" && d.type == "method") {
-                            return color("method");
-                        } else if (d.kind == "var" && d.type == "field") {
-                            return color("field");
-                        }
-                        return color(d.kind) || "#999";
-                    })
-                    .attr("cx", (d) => d.x || width / 2)
-                    .attr("cy", (d) => d.y || height / 2)
-                    .call(
-                        d3
-                            .drag()
-                            .on("start", dragstarted)
-                            .on("drag", dragged)
-                            .on("end", dragended),
-                    )
-                    .on("click", (event, d) => {
-                        event.stopPropagation();
-                        handleNodeClick(d.id, event.shiftKey);
-                    });
-
-                node = nodeEnter.merge(node);
-
-                // Update labels
-                const labelGroup = g.select(".labels-group");
-                label = labelGroup.selectAll("text").data(nodes, (d) => d.id);
-
-                label.exit().remove();
-
-                const labelEnter = label
-                    .enter()
-                    .append("text")
-                    .attr("class", "node-label")
-                    .text((d) => d.name)
-                    .attr("x", (d) => (d.x || width / 2) + 8)
-                    .attr("y", (d) => (d.y || height / 2) + 3)
-                    .style("display", state.showLabels ? "block" : "none");
-
-                label = labelEnter.merge(label);
-
-                // Update simulation
-                simulation.nodes(nodes);
+                simulation.nodes(filteredNodes);
                 simulation.force("link").links(d3Links);
-                simulation.alpha(0.3).restart();
+                simulation.alpha(0.3);
 
                 applyHighlighting();
             }
@@ -779,91 +1040,28 @@
                 } else {
                     state.hiddenNodeIds.add(nodeId);
                 }
-                applyHighlighting();
-                updateSidebar();
                 updateGraph();
             }
 
             function applyHighlighting() {
+                highlightState.outgoingNodes.clear();
+                highlightState.incomingNodes.clear();
+
                 if (state.selectedNodeIds.size === 0) {
-                    node.classed(
-                        "selected muted highlight out in internal",
-                        false,
-                    );
-                    label.classed("selected muted", false);
-                    link.classed("highlight out in internal muted", false);
+                    scheduleRender();
                     return;
                 }
 
-                // Build highlight sets for efficiency
-                const highlightNodes = new Set(state.selectedNodeIds);
-                const outgoingNodes = new Set();
-                const incomingNodes = new Set();
-                const highlightLinks = new Set();
-
                 state.selectedNodeIds.forEach((id) => {
                     graphData.getOutgoingLinks(id).forEach((l) => {
-                        outgoingNodes.add(l.to);
-                        highlightLinks.add(`${l.from}-${l.to}`);
+                        highlightState.outgoingNodes.add(l.to);
                     });
                     graphData.getIncomingLinks(id).forEach((l) => {
-                        incomingNodes.add(l.from);
-                        highlightLinks.add(`${l.from}-${l.to}`);
+                        highlightState.incomingNodes.add(l.from);
                     });
                 });
 
-                // Apply node classes
-                node.classed("selected", (d) =>
-                    state.selectedNodeIds.has(d.id),
-                ).classed(
-                    "muted",
-                    (d) =>
-                        !highlightNodes.has(d.id) &&
-                        !outgoingNodes.has(d.id) &&
-                        !incomingNodes.has(d.id),
-                );
-
-                label
-                    .classed("selected", (d) => state.selectedNodeIds.has(d.id))
-                    .classed(
-                        "muted",
-                        (d) =>
-                            !highlightNodes.has(d.id) &&
-                            !outgoingNodes.has(d.id) &&
-                            !incomingNodes.has(d.id),
-                    );
-
-                // Apply link classes
-                link.classed(
-                    "highlight",
-                    (d) =>
-                        state.selectedNodeIds.has(d.from) ||
-                        state.selectedNodeIds.has(d.to),
-                )
-                    .classed(
-                        "out",
-                        (d) =>
-                            state.selectedNodeIds.has(d.from) &&
-                            outgoingNodes.has(d.to),
-                    )
-                    .classed(
-                        "in",
-                        (d) =>
-                            state.selectedNodeIds.has(d.to) &&
-                            incomingNodes.has(d.from),
-                    )
-                    .classed(
-                        "internal",
-                        (d) =>
-                            state.selectedNodeIds.has(d.from) &&
-                            state.selectedNodeIds.has(d.to),
-                    )
-                    .classed(
-                        "muted",
-                        (d) =>
-                            !state.selectedNodeIds.has(d.from) &&
-                            !state.selectedNodeIds.has(d.to),
-                    );
+                scheduleRender();
             }
 
             function handleNodeClick(nodeId, shiftKey) {
@@ -872,23 +1070,18 @@
                 const newSelections = new Set();
                 const targetNode = graphData.getNode(nodeId);
 
-                // If selecting a type, also select its methods and fields
                 if (targetNode && targetNode.kind === "type") {
                     newSelections.add(nodeId);
                     const typeName = targetNode.name;
 
-                    // Find all methods and fields belonging to this type
                     graphData.nodes.forEach((n) => {
                         if (
                             (n.kind === "func" && n.type === "method") ||
                             (n.kind === "var" && n.type === "field")
                         ) {
-                            // Check if method name starts with TypeName.
                             if (n.name.startsWith(typeName + ".")) {
                                 newSelections.add(n.id);
-                            }
-                            // Also check ID patterns like (*pkg.Graph).Method or (pkg.Graph).Method
-                            else if (
+                            } else if (
                                 n.id.includes(
                                     "(*" +
                                         targetNode.pkg +
@@ -913,7 +1106,6 @@
                 }
 
                 if (shiftKey) {
-                    // Toggle selection
                     newSelections.forEach((sid) => {
                         if (state.selectedNodeIds.has(sid)) {
                             state.selectedNodeIds.delete(sid);
@@ -922,7 +1114,6 @@
                         }
                     });
                 } else {
-                    // Replace selection
                     state.selectedNodeIds = new Set(newSelections);
                 }
 
@@ -1009,7 +1200,156 @@
                 info.innerHTML = html + "</ul>";
             }
 
+            // Canvas interaction handlers
+            function getMousePos(event) {
+                const rect = canvas.getBoundingClientRect();
+                return {
+                    x: event.clientX - rect.left,
+                    y: event.clientY - rect.top,
+                };
+            }
+
+            function screenToWorld(screenX, screenY) {
+                return {
+                    x: (screenX - state.transform.x) / state.transform.k,
+                    y: (screenY - state.transform.y) / state.transform.k,
+                };
+            }
+
+            function findNodeAtPosition(worldX, worldY) {
+                for (let i = filteredNodes.length - 1; i >= 0; i--) {
+                    const node = filteredNodes[i];
+                    const radius = getNodeRadius(node);
+                    const dx = worldX - node.x;
+                    const dy = worldY - node.y;
+                    const distSq = dx * dx + dy * dy;
+                    if (distSq <= radius * radius) {
+                        return node;
+                    }
+                }
+                return null;
+            }
+
+            let draggedNode = null;
+            let isPanning = false;
+            let lastMousePos = null;
+            let hasMoved = false;
+            let hoveredNode = null;
+
             function setupEventListeners() {
+                // Canvas interaction events
+                canvas.addEventListener("mousedown", (event) => {
+                    const mousePos = getMousePos(event);
+                    const worldPos = screenToWorld(mousePos.x, mousePos.y);
+                    const node = findNodeAtPosition(worldPos.x, worldPos.y);
+
+                    hasMoved = false;
+
+                    if (node) {
+                        draggedNode = node;
+                        draggedNode.fx = draggedNode.x;
+                        draggedNode.fy = draggedNode.y;
+                        simulation.alphaTarget(0.3);
+                    } else {
+                        isPanning = true;
+                        lastMousePos = mousePos;
+                    }
+                });
+
+                canvas.addEventListener("mousemove", (event) => {
+                    if (draggedNode) {
+                        hasMoved = true;
+                        const mousePos = getMousePos(event);
+                        const worldPos = screenToWorld(mousePos.x, mousePos.y);
+                        draggedNode.fx = worldPos.x;
+                        draggedNode.fy = worldPos.y;
+                    } else if (isPanning && lastMousePos) {
+                        const mousePos = getMousePos(event);
+                        const dx = mousePos.x - lastMousePos.x;
+                        const dy = mousePos.y - lastMousePos.y;
+
+                        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+                            hasMoved = true;
+                        }
+
+                        state.transform.x += dx;
+                        state.transform.y += dy;
+                        lastMousePos = mousePos;
+                        scheduleRender();
+                        updateURL();
+                    } else {
+                        // Update cursor based on hover state
+                        const mousePos = getMousePos(event);
+                        const worldPos = screenToWorld(mousePos.x, mousePos.y);
+                        const node = findNodeAtPosition(worldPos.x, worldPos.y);
+
+                        if (node !== hoveredNode) {
+                            hoveredNode = node;
+                            container.style.cursor = node ? "pointer" : "grab";
+                        }
+                    }
+                });
+
+                canvas.addEventListener("mouseup", (event) => {
+                    if (draggedNode) {
+                        simulation.alphaTarget(0);
+                        draggedNode.fx = null;
+                        draggedNode.fy = null;
+                        draggedNode = null;
+                    } else if (isPanning) {
+                        isPanning = false;
+                        lastMousePos = null;
+                    }
+                });
+
+                canvas.addEventListener("click", (event) => {
+                    // Don't process clicks if we were dragging or panning
+                    if (hasMoved) {
+                        hasMoved = false;
+                        return;
+                    }
+
+                    const mousePos = getMousePos(event);
+                    const worldPos = screenToWorld(mousePos.x, mousePos.y);
+                    const node = findNodeAtPosition(worldPos.x, worldPos.y);
+
+                    if (node) {
+                        handleNodeClick(node.id, event.shiftKey);
+                    } else {
+                        resetFocus();
+                    }
+                });
+
+                canvas.addEventListener("wheel", (event) => {
+                    event.preventDefault();
+
+                    const mousePos = getMousePos(event);
+                    const worldPosBefore = screenToWorld(
+                        mousePos.x,
+                        mousePos.y,
+                    );
+
+                    // Reduced zoom speed for smoother control
+                    const scaleFactor = event.deltaY > 0 ? 0.98 : 1.02;
+                    const newScale = Math.max(
+                        0.01,
+                        Math.min(4, state.transform.k * scaleFactor),
+                    );
+                    state.transform.k = newScale;
+
+                    const worldPosAfter = screenToWorld(mousePos.x, mousePos.y);
+                    state.transform.x +=
+                        (worldPosAfter.x - worldPosBefore.x) *
+                        state.transform.k;
+                    state.transform.y +=
+                        (worldPosAfter.y - worldPosBefore.y) *
+                        state.transform.k;
+
+                    scheduleRender();
+                    updateURL();
+                });
+
+                // UI control events
                 document
                     .querySelectorAll(".legend-item[data-group]")
                     .forEach((item) => {
@@ -1041,10 +1381,7 @@
                     .getElementById("show-labels")
                     .addEventListener("change", (e) => {
                         state.showLabels = e.target.checked;
-                        label.style(
-                            "display",
-                            state.showLabels ? "block" : "none",
-                        );
+                        scheduleRender();
                         updateURL();
                     });
 
@@ -1053,7 +1390,7 @@
                     .addEventListener("input", (e) => {
                         state.linkDistance = +e.target.value;
                         simulation.force("link").distance(state.linkDistance);
-                        simulation.alpha(0.3).restart();
+                        simulation.alpha(0.3);
                         updateURL();
                     });
 
@@ -1062,15 +1399,7 @@
                     .addEventListener("input", (e) => {
                         state.charge = +e.target.value;
                         simulation.force("charge").strength(state.charge);
-                        simulation.alpha(0.3).restart();
-                        updateURL();
-                    });
-
-                document
-                    .getElementById("cluster-strength")
-                    .addEventListener("input", (e) => {
-                        state.clusterStrength = +e.target.value;
-                        simulation.alpha(0.3).restart();
+                        simulation.alpha(0.3);
                         updateURL();
                     });
 
@@ -1083,54 +1412,18 @@
                     .addEventListener("click", resetFocus);
 
                 document
-                    .getElementById("export-svg")
+                    .getElementById("export-png")
                     .addEventListener("click", () => {
-                        // Clone the SVG to avoid modifying the live one
-                        const svgEl = document.getElementById("graph");
-                        const w = svgEl.width;
-                        const h = svgEl.height;
-                        const clone = svgEl.cloneNode(true);
-
-                        // Explicitly add the namespace and styles for standalone viewing
-                        clone.setAttribute(
-                            "xmlns",
-                            "http://www.w3.org/2000/svg",
-                        );
-                        clone.setAttribute(
-                            "width",
-                            `${w.baseVal.value}${w.baseVal.unitType}`,
-                        );
-                        clone.setAttribute(
-                            "height",
-                            `${h.baseVal.value}${h.baseVal.unitType}`,
-                        );
-
-                        // Inline the styles so the exported file looks correct
-                        const styleString = Array.from(
-                            document.styleSheets[0].cssRules,
-                        )
-                            .map((rule) => rule.cssText)
-                            .join(" ");
-                        const styleEl = document.createElement("style");
-                        styleEl.textContent = styleString;
-                        clone.prepend(styleEl);
-
-                        // Serialize and download
-                        const svgData = new XMLSerializer().serializeToString(
-                            clone,
-                        );
-                        const blob = new Blob([svgData], {
-                            type: "image/svg+xml;charset=utf-8",
+                        canvas.toBlob((blob) => {
+                            const url = URL.createObjectURL(blob);
+                            const link = document.createElement("a");
+                            link.href = url;
+                            link.download = `graph-export-${new Date().getTime()}.png`;
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                            URL.revokeObjectURL(url);
                         });
-                        const url = URL.createObjectURL(blob);
-
-                        const link = document.createElement("a");
-                        link.href = url;
-                        link.download = `graph-export-${new Date().getTime()}.svg`;
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                        URL.revokeObjectURL(url);
                     });
 
                 window.onhashchange = () => {
@@ -1152,7 +1445,7 @@
                     .filter((n) =>
                         n.name.toLowerCase().includes(normalizedTerm),
                     )
-                    .slice(0, 50); // Limit results for performance
+                    .slice(0, 50);
 
                 let html = "<ul class='sidebar-list'>";
                 matches.forEach((m) => {
@@ -1164,31 +1457,13 @@
                 resultsDiv.innerHTML = html + "</ul>";
             }
 
-            function dragstarted(event) {
-                if (!event.active) simulation.alphaTarget(0.3).restart();
-                event.subject.fx = event.subject.x;
-                event.subject.fy = event.subject.y;
-            }
-
-            function dragged(event) {
-                event.subject.fx = event.x;
-                event.subject.fy = event.y;
-            }
-
-            function dragended(event) {
-                if (!event.active) simulation.alphaTarget(0);
-                event.subject.fx = null;
-                event.subject.fy = null;
-            }
-
             function fitSelection() {
                 if (state.selectedNodeIds.size === 0) return;
 
-                const selectedNodes = graphData.nodes.filter((n) =>
+                const selectedNodes = filteredNodes.filter((n) =>
                     state.selectedNodeIds.has(n.id),
                 );
 
-                // Filter out nodes without positions
                 const positionedNodes = selectedNodes.filter(
                     (n) => n.x !== undefined && n.y !== undefined,
                 );
@@ -1207,27 +1482,50 @@
                 });
 
                 const padding = 100;
-                const selectionWidth = maxX - minX;
-                const selectionHeight = maxY - minY;
+                const selectionWidth = maxX - minX + padding * 2;
+                const selectionHeight = maxY - minY + padding * 2;
                 const scale = Math.min(
-                    width / (selectionWidth || 1),
-                    height / (selectionHeight || 1),
+                    width / selectionWidth,
+                    height / selectionHeight,
                     2,
                 );
                 const centerX = (minX + maxX) / 2;
                 const centerY = (minY + maxY) / 2;
 
-                svg.transition()
-                    .duration(750)
-                    .call(
-                        zoom.transform,
-                        d3.zoomIdentity
-                            .translate(
-                                width / 2 - scale * centerX,
-                                height / 2 - scale * centerY,
-                            )
-                            .scale(scale),
-                    );
+                // Animate transform
+                const startTransform = { ...state.transform };
+                const endTransform = {
+                    x: width / 2 - scale * centerX,
+                    y: height / 2 - scale * centerY,
+                    k: scale,
+                };
+
+                const duration = 750;
+                const startTime = Date.now();
+
+                function animate() {
+                    const elapsed = Date.now() - startTime;
+                    const t = Math.min(1, elapsed / duration);
+                    const eased = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // easeInOutQuad
+
+                    state.transform.x =
+                        startTransform.x +
+                        (endTransform.x - startTransform.x) * eased;
+                    state.transform.y =
+                        startTransform.y +
+                        (endTransform.y - startTransform.y) * eased;
+                    state.transform.k =
+                        startTransform.k +
+                        (endTransform.k - startTransform.k) * eased;
+
+                    render();
+
+                    if (t < 1) {
+                        requestAnimationFrame(animate);
+                    }
+                }
+
+                animate();
             }
 
             function updateURL() {
@@ -1242,7 +1540,9 @@
                 params.set("labels", state.showLabels);
                 params.set("dist", state.linkDistance);
                 params.set("charge", state.charge);
-                params.set("cluster", state.clusterStrength);
+                params.set("zoom", state.transform.k.toFixed(3));
+                params.set("x", state.transform.x.toFixed(2));
+                params.set("y", state.transform.y.toFixed(2));
                 window.history.pushState(null, "", "#" + params.toString());
             }
 
@@ -1297,10 +1597,16 @@
                     }
                 }
 
-                if (params.has("cluster")) {
-                    state.clusterStrength = +params.get("cluster");
-                    document.getElementById("cluster-strength").value =
-                        state.clusterStrength;
+                if (params.has("zoom")) {
+                    state.transform.k = +params.get("zoom");
+                }
+
+                if (params.has("x")) {
+                    state.transform.x = +params.get("x");
+                }
+
+                if (params.has("y")) {
+                    state.transform.y = +params.get("y");
                 }
             }
 

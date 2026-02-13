@@ -7,51 +7,54 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 )
 
-// --- Main CLI Wrapper ---
-
 func main() {
-	vizMode := flag.Bool("viz", false, "Serve web visualization instead of raw text")
+	jsonMode := flag.Bool("json", false, "Output JSON to stdout instead of serving visualization")
 	port := flag.String("port", "8080", "Port for visualization")
 	flag.Parse()
 
 	args := flag.Args()
-	if len(args) < 1 {
-		fmt.Println("Usage: sgope [-viz] [-port 8080] <package-path> [<package-path>...] ")
+
+	var jsonData []byte
+	var err error
+
+	// If no args provided and not in JSON mode, read from stdin
+	if len(args) == 0 && !*jsonMode {
+		fmt.Fprintln(os.Stderr, "Reading graph data from stdin...")
+		jsonData, err = io.ReadAll(os.Stdin)
+		if err != nil {
+			log.Fatalf("Failed to read JSON from stdin: %v", err)
+		}
+	} else if len(args) == 0 {
+		fmt.Println("Usage: sgope [-json] [-port 8080] <package-path> [<package-path>...] ")
 		fmt.Println("  Use '...' suffix for recursive package discovery (e.g., ./pkg/...)")
+		fmt.Println("  Omit package paths to read graph data from stdin and serve visualization")
 		os.Exit(1)
-	}
+	} else {
+		graph, err := analyzePackages(args...)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	if len(args) == 0 {
-		fmt.Println("No valid packages found")
-		os.Exit(1)
-	}
-
-	// 1. Run Analysis
-	graph, err := analyzePackages(args...)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// 2. Decide output format
-	if !*vizMode {
-		// Text mode: output JSON
-		jsonData, err := json.MarshalIndent(graph, "", "  ")
+		if *jsonMode {
+			jsonData, err = json.MarshalIndent(graph, "", "  ")
+		} else {
+			jsonData, err = json.Marshal(graph)
+		}
 		if err != nil {
 			log.Fatalf("JSON marshaling error: %v", err)
 		}
+	}
+
+	if *jsonMode {
 		fmt.Println(string(jsonData))
 	} else {
-		// Viz mode: generate HTML with embedded JSON
-		jsonData, err := json.Marshal(graph)
-		if err != nil {
-			log.Fatalf("JSON marshaling error: %v", err)
-		}
 		html := generateHTML(string(jsonData))
 
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
