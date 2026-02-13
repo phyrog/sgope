@@ -62,6 +62,10 @@
             .muted {
                 stroke-opacity: 0.2;
             }
+            .node.muted,
+            .node-label.muted {
+                filter: brightness(50%);
+            }
             .highlight.out {
                 stroke: #4ecdc4 !important;
                 stroke-width: 2px !important;
@@ -78,7 +82,7 @@
                 font-size: 10px;
                 pointer-events: none;
                 fill: #fff;
-                text-shadow: #000 1px 0 10px;
+                text-shadow: #000 0 0 1em;
             }
             .legend {
                 position: fixed;
@@ -786,6 +790,7 @@
                         "selected muted highlight out in internal",
                         false,
                     );
+                    label.classed("selected muted", false);
                     link.classed("highlight out in internal muted", false);
                     return;
                 }
@@ -817,6 +822,16 @@
                         !outgoingNodes.has(d.id) &&
                         !incomingNodes.has(d.id),
                 );
+
+                label
+                    .classed("selected", (d) => state.selectedNodeIds.has(d.id))
+                    .classed(
+                        "muted",
+                        (d) =>
+                            !highlightNodes.has(d.id) &&
+                            !outgoingNodes.has(d.id) &&
+                            !incomingNodes.has(d.id),
+                    );
 
                 // Apply link classes
                 link.classed(
