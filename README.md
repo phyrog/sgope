@@ -8,7 +8,7 @@ Visualize dependencies in your go code
 
 ```
 go install github.com/phyrog/sgope@latest
-sgope -viz ./package-path/...
+sgope ./package-path/...
 ```
 
 and then visit http://localhost:8080
