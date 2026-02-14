@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
@@ -94,6 +96,7 @@ type Node struct {
 	LocalName string `json:"name"`
 	Parent    string `json:"parent,omitempty"`
 	Test      bool   `json:"test,omitempty"`
+	Position  string `json:"position,omitempty"`
 	obj       types.Object
 	pkg       *packages.Package
 }
@@ -117,7 +120,7 @@ func (ls linkSet) Insert(from, to string) {
 func analyzePackages(paths ...string) (*Graph, error) {
 	cfg := &packages.Config{
 		Tests: true,
-		Mode:  packages.NeedName | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Mode:  packages.NeedName | packages.NeedImports | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo | packages.NeedModule,
 	}
 	pkgs, err := packages.Load(cfg, paths...)
 	if err != nil {
@@ -231,6 +234,7 @@ func analyzePackages(paths ...string) (*Graph, error) {
 
 func objNodes(pkg *packages.Package, obj types.Object) []Node {
 	filename := pkg.Fset.Position(obj.Pos()).Filename
+	start, end := getObjectRange(pkg, obj)
 	pkgName := pkg.Name
 	isTest := strings.HasSuffix(filename, "_test.go") || strings.HasSuffix(pkgName, "_test")
 	switch t := obj.(type) {
@@ -243,6 +247,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			Id:        id(t),
 			LocalName: t.Name(),
 			Pkg:       obj.Pkg().Path(),
+			Position:  formatRange(pkg, start, end),
 			Test:      isTest,
 		}}
 	case *types.TypeName:
@@ -259,11 +264,13 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Position:  formatRange(pkg, start, end),
 				Test:      isTest,
 			}
 			nodes = append(nodes, node)
 
 			for field := range u.Fields() {
+				start, end := getObjectRange(pkg, field)
 				nodes = append(nodes, Node{
 					obj:       field,
 					pkg:       pkg,
@@ -273,6 +280,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Parent:    node.Id,
 					LocalName: t.Name() + "." + field.Name(),
 					Pkg:       obj.Pkg().Path(),
+					Position:  formatRange(pkg, start, end),
 					Test:      isTest,
 				})
 			}
@@ -286,11 +294,13 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Position:  formatRange(pkg, start, end),
 				Test:      isTest,
 			}
 			nodes = append(nodes, node)
 
 			for method := range u.ExplicitMethods() {
+				start, end := getObjectRange(pkg, method)
 				nodes = append(nodes, Node{
 					obj:       method,
 					pkg:       pkg,
@@ -300,6 +310,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Parent:    node.Id,
 					LocalName: t.Name() + "." + method.Name(),
 					Pkg:       obj.Pkg().Path(),
+					Position:  formatRange(pkg, start, end),
 					Test:      isTest,
 				})
 			}
@@ -313,6 +324,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Position:  formatRange(pkg, start, end),
 				Test:      isTest,
 			})
 		case *types.Signature:
@@ -324,6 +336,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Position:  formatRange(pkg, start, end),
 				Test:      isTest,
 			})
 		default:
@@ -335,12 +348,14 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 				Id:        id(t),
 				LocalName: t.Name(),
 				Pkg:       obj.Pkg().Path(),
+				Position:  formatRange(pkg, start, end),
 				Test:      isTest,
 			})
 		}
 
 		if named, ok := t.Type().(*types.Named); ok {
 			for method := range named.Methods() {
+				start, end := getObjectRange(pkg, method)
 				nodes = append(nodes, Node{
 					obj:       method,
 					pkg:       pkg,
@@ -350,6 +365,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Parent:    named.String(),
 					LocalName: t.Name() + "." + method.Name(),
 					Pkg:       obj.Pkg().Path(),
+					Position:  formatRange(pkg, start, end),
 					Test:      isTest,
 				})
 			}
@@ -363,6 +379,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			Id:        t.Id(),
 			LocalName: t.Name(),
 			Pkg:       obj.Pkg().Path(),
+			Position:  formatRange(pkg, start, end),
 			Test:      isTest,
 		}}
 	case *types.Var:
@@ -374,6 +391,7 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 			Id:        t.Id(),
 			LocalName: t.Name(),
 			Pkg:       obj.Pkg().Path(),
+			Position:  formatRange(pkg, start, end),
 			Test:      isTest,
 		}}
 	}
@@ -418,4 +436,48 @@ func underlyingTypes(t types.Type) []types.Type {
 	}
 
 	return []types.Type{t}
+}
+
+func getObjectRange(pkg *packages.Package, obj types.Object) (start, end token.Pos) {
+	pos := obj.Pos()
+	if pos == token.NoPos {
+		return pos, pos
+	}
+
+	var targetFile *ast.File
+	for _, f := range pkg.Syntax {
+		if pos >= f.Pos() && pos <= f.End() {
+			targetFile = f
+			break
+		}
+	}
+	if targetFile == nil {
+		return pos, pos
+	}
+	path, _ := astutil.PathEnclosingInterval(targetFile, pos, pos)
+
+	for _, node := range path {
+		switch n := node.(type) {
+		case *ast.Field, *ast.TypeSpec, *ast.FuncDecl, *ast.ValueSpec:
+			return n.Pos(), n.End()
+		}
+	}
+	return pos, pos
+}
+
+func formatRange(pkg *packages.Package, start token.Pos, end token.Pos) string {
+	startPos := pkg.Fset.Position(start)
+	endPos := pkg.Fset.Position(end)
+
+	filename := startPos.Filename
+
+	if pkg.Module != nil {
+		if rel, err := filepath.Rel(pkg.Module.Dir, filename); err == nil {
+			filename = rel
+		}
+	}
+
+	return fmt.Sprintf("%s:%d:%d-%d:%d",
+		filename, startPos.Line, startPos.Column,
+		endPos.Line, endPos.Column)
 }

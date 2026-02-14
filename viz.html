@@ -229,7 +229,7 @@
                     type="range"
                     id="pkg-cluster-strength"
                     min="0"
-                    max="1"
+                    max="0.9"
                     step="0.05"
                     value="0.3"
             /></label>
@@ -553,10 +553,7 @@
                     .forceSimulation()
                     .force(
                         "link",
-                        d3ForceWebgpu
-                            .forceLink()
-                            .id((d) => d.id)
-                            .distance(state.linkDistance),
+                        d3ForceWebgpu.forceLink().id((d) => d.id),
                     )
                     .force(
                         "charge",
@@ -733,7 +730,7 @@
                     ctx.globalAlpha = batch.opacity;
                     ctx.strokeStyle = batch.strokeStyle;
                     ctx.lineWidth = batch.strokeWidth;
-                    ctx.setLineDash(batch.isDashed ? [4, 4] : []);
+                    ctx.setLineDash(batch.isDashed ? [4, 8] : []);
 
                     ctx.beginPath();
                     batch.links.forEach((link) => {
@@ -1024,12 +1021,7 @@
                 simulation
                     .force("link")
                     .links(d3Links)
-                    .strength((link) => {
-                        if (state.pkgClusterStrength === 0) {
-                            return 1.0; // Normal strength when clustering disabled
-                        }
-
-                        // Get source and target nodes
+                    .distance((link) => {
                         const sourceNode =
                             typeof link.source === "object"
                                 ? link.source
@@ -1039,7 +1031,8 @@
                                 ? link.target
                                 : graphData.getNode(link.target);
 
-                        if (!sourceNode || !targetNode) return 1.0;
+                        if (!sourceNode || !targetNode)
+                            return state.linkDistance;
 
                         // If cross-package link, weaken it based on clustering strength
                         if (
@@ -1048,9 +1041,9 @@
                             sourceNode.pkg !== targetNode.pkg
                         ) {
                             // At max clustering (1.0), cross-package links have near-zero strength
-                            return Math.max(
-                                0.3,
-                                1.0 - state.pkgClusterStrength,
+                            return (
+                                state.linkDistance *
+                                (1 + state.pkgClusterStrength)
                             );
                         }
 
