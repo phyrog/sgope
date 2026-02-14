@@ -57,8 +57,16 @@ func main() {
 	} else {
 		html := generateHTML(string(jsonData))
 
+		http.HandleFunc("/d3.js", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "max-age=604800")
+			w.Write([]byte(d3))
+		})
+
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+			w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
 			w.Write([]byte(html))
 		})
 
@@ -66,6 +74,9 @@ func main() {
 		log.Fatal(http.ListenAndServe(":"+*port, nil))
 	}
 }
+
+//go:embed d3.v7.min.js
+var d3 string
 
 //go:embed viz.html
 var html string

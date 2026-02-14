@@ -4,7 +4,7 @@
     <head>
         <meta charset="utf-8" />
         <title>sgope</title>
-        <script src="https://d3js.org/d3.v7.min.js"></script>
+        <script src="/d3.js"></script>
         <style id="graph-styles">
             body {
                 margin: 0;
@@ -315,13 +315,10 @@
             await Promise.all(
                 data.nodes.map(async (n) => {
                     const pos = await nodePosition(n.id);
-                    console.log(pos);
                     n.x = pos[0];
                     n.y = pos[1];
                 }),
             );
-
-            console.log(data);
 
             // Color scheme
             const color = d3.scaleOrdinal(d3.schemeSet3);
