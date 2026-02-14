@@ -300,6 +300,29 @@
 
             const data = DATA_PLACEHOLDER;
 
+            async function nodePosition(str) {
+                const encoder = new TextEncoder();
+                const data = encoder.encode(str);
+                const hashBuffer = await crypto.subtle.digest("SHA-1", data);
+                const hashArray = new Uint8Array(hashBuffer);
+
+                const num1 = (hashArray[0] << 8) | hashArray[1];
+                const num2 = (hashArray[2] << 8) | hashArray[3];
+
+                return [num1, num2];
+            }
+
+            await Promise.all(
+                data.nodes.map(async (n) => {
+                    const pos = await nodePosition(n.id);
+                    console.log(pos);
+                    n.x = pos[0];
+                    n.y = pos[1];
+                }),
+            );
+
+            console.log(data);
+
             // Color scheme
             const color = d3.scaleOrdinal(d3.schemeSet3);
 
@@ -548,6 +571,7 @@
                     )
                     .force("x", d3ForceWebgpu.forceX(width / 2).strength(0.01))
                     .force("y", d3ForceWebgpu.forceY(height / 2).strength(0.01))
+                    .alphaDecay(0.001)
                     .stop(); // Stop automatic ticking
 
                 // Start manual simulation loop
