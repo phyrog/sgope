@@ -299,6 +299,7 @@
             import * as d3ForceWebgpu from "https://esm.sh/d3-force-webgpu";
 
             const data = DATA_PLACEHOLDER;
+            const moduleRoot = "MODULE_ROOT_PLACEHOLDER";
 
             async function nodePosition(str) {
                 const encoder = new TextEncoder();
@@ -1296,6 +1297,14 @@
             let hasMoved = false;
             let hoveredNode = null;
 
+            function openInZed(position) {
+                if (!position) return;
+                // position format: "path/to/file.go:line:col-line:col"
+                const start = position.split("-")[0];
+                const url = `zed://file/${moduleRoot}/${start}`;
+                window.open(url);
+            }
+
             function setupEventListeners() {
                 // Canvas interaction events
                 canvas.addEventListener("mousedown", (event) => {
@@ -1375,7 +1384,11 @@
                     const node = findNodeAtPosition(worldPos.x, worldPos.y);
 
                     if (node) {
-                        handleNodeClick(node.id, event.shiftKey);
+                        if (event.altKey) {
+                            openInZed(node.position);
+                        } else {
+                            handleNodeClick(node.id, event.shiftKey);
+                        }
                     } else {
                         resetFocus();
                     }

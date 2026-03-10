@@ -55,7 +55,11 @@ func main() {
 	if *jsonMode {
 		fmt.Println(string(jsonData))
 	} else {
-		html := generateHTML(string(jsonData))
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatal(err)
+		}
+		html := generateHTML(string(jsonData), cwd)
 
 		http.HandleFunc("/d3.js", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
@@ -82,6 +86,6 @@ var d3 string
 var html string
 
 // generateHTML takes JSON data as a string and embeds it in the HTML
-func generateHTML(jsonData string) string {
-	return strings.Replace(html, "DATA_PLACEHOLDER", jsonData, 1)
+func generateHTML(jsonData, modulePath string) string {
+	return strings.Replace(strings.Replace(html, "MODULE_ROOT_PLACEHOLDER", modulePath, 1), "DATA_PLACEHOLDER", jsonData, 1)
 }

@@ -147,6 +147,30 @@ func analyzePackages(paths ...string) (*Graph, error) {
 
 	links := make(linkSet)
 
+	// Collect interface implementations
+	for _, node := range graph.Nodes {
+		if node.Kind != kindType {
+			continue
+		}
+		named, ok := node.obj.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+
+		for _, other := range graph.Nodes {
+			if other.Kind != kindType || other.Type != typeInterface {
+				continue
+			}
+			iface, ok := other.obj.Type().Underlying().(*types.Interface)
+			if !ok {
+				continue
+			}
+			if types.Implements(types.NewPointer(named), iface) || types.Implements(named, iface) {
+				links.Insert(node.Id, other.Id)
+			}
+		}
+	}
+
 	// Collect usage links
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
@@ -162,10 +186,15 @@ func analyzePackages(paths ...string) (*Graph, error) {
 						for _, typ := range ts {
 							named, ok := typ.(*types.Named)
 							if ok {
-								typ = named.Underlying()
-								if _, ok = typ.(*types.Struct); ok {
+								underlying := named.Underlying()
+								switch underlying.(type) {
+								case *types.Struct:
 									if refEntity := graph.Nodes[id(named.Obj())]; refEntity != nil {
 										links.Insert(parentNode.Id, "("+refEntity.Id+")."+refObj.Name())
+									}
+								case *types.Interface:
+									if refEntity := graph.Nodes[id(refObj)]; refEntity != nil {
+										links.Insert(parentNode.Id, refEntity.Id)
 									}
 								}
 							}
@@ -188,8 +217,17 @@ func analyzePackages(paths ...string) (*Graph, error) {
 	// Collect method and field links
 	for _, node := range graph.Nodes {
 		if named, ok := node.obj.Type().(*types.Named); ok {
-			for method := range named.Methods() {
-				links.Insert(id(method), node.Id)
+			mSet := types.NewMethodSet(types.NewPointer(named))
+			for sel := range mSet.Methods() {
+				method := sel.Obj().(*types.Func)
+				promoted := len(sel.Index()) > 1
+				if promoted {
+					fieldId := embeddedFieldID(named, sel.Index()[0])
+					links.Insert(promotedMethodID(named, method), fieldId)
+				} else {
+					links.Insert(id(method), node.Id)
+				}
+
 			}
 			switch u := named.Underlying().(type) {
 			case *types.Interface:
@@ -205,13 +243,32 @@ func analyzePackages(paths ...string) (*Graph, error) {
 				}
 			case *types.Struct:
 				for field := range u.Fields() {
-					types := underlyingTypes(field.Type())
-					for _, typ := range types {
+					typs := underlyingTypes(field.Type())
+					for _, typ := range typs {
 						if typeNode, ok := graph.Nodes[typ.String()]; ok {
 							links.Insert("("+node.Id+")."+field.Name(), typeNode.Id)
 						}
 					}
 					links.Insert("("+node.Id+")."+field.Name(), node.Id)
+
+					// fields of embedded fields
+					if field.Anonymous() {
+						ft := field.Type()
+						if ptr, ok := ft.(*types.Pointer); ok {
+							ft = ptr.Elem()
+						}
+						if embedded, ok := ft.(*types.Named); ok {
+							if embeddedStruct, ok := embedded.Underlying().(*types.Struct); ok {
+								for pf := range embeddedStruct.Fields() {
+									promotedID := fmt.Sprintf("(%s.%s).%s",
+										node.obj.Pkg().Path(), named.Obj().Name(), pf.Name())
+									fieldID := fmt.Sprintf("(%s.%s).%s",
+										node.obj.Pkg().Path(), named.Obj().Name(), field.Name())
+									links.Insert(promotedID, fieldID)
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -283,6 +340,42 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 					Position:  formatRange(pkg, start, end),
 					Test:      isTest,
 				})
+
+				// fields of embedded fields
+				for field := range u.Fields() {
+					if !field.Anonymous() {
+						continue
+					}
+					ft := field.Type()
+					if ptr, ok := ft.(*types.Pointer); ok {
+						ft = ptr.Elem()
+					}
+					embedded, ok := ft.(*types.Named)
+					if !ok {
+						continue
+					}
+					embeddedStruct, ok := embedded.Underlying().(*types.Struct)
+					if !ok {
+						continue
+					}
+					for pf := range embeddedStruct.Fields() {
+						start, end := getObjectRange(pkg, pf)
+						promotedID := fmt.Sprintf("(%s.%s).%s",
+							obj.Pkg().Path(), t.Name(), pf.Name())
+						nodes = append(nodes, Node{
+							obj:       pf,
+							pkg:       pkg,
+							Kind:      kindVar,
+							Type:      varField,
+							Id:        promotedID,
+							Parent:    node.Id,
+							LocalName: t.Name() + "." + pf.Name(),
+							Pkg:       obj.Pkg().Path(),
+							Position:  formatRange(pkg, start, end),
+							Test:      isTest,
+						})
+					}
+				}
 			}
 		// type foo interface{}
 		case *types.Interface:
@@ -354,14 +447,22 @@ func objNodes(pkg *packages.Package, obj types.Object) []Node {
 		}
 
 		if named, ok := t.Type().(*types.Named); ok {
-			for method := range named.Methods() {
+			mSet := types.NewMethodSet(types.NewPointer(named))
+			for sel := range mSet.Methods() {
+				method := sel.Obj().(*types.Func)
 				start, end := getObjectRange(pkg, method)
+
+				promoted := len(sel.Index()) > 1
+				nodeId := id(method)
+				if promoted {
+					nodeId = promotedMethodID(named, method)
+				}
 				nodes = append(nodes, Node{
 					obj:       method,
 					pkg:       pkg,
 					Kind:      kindFunc,
 					Type:      funcMethod,
-					Id:        id(method),
+					Id:        nodeId,
 					Parent:    named.String(),
 					LocalName: t.Name() + "." + method.Name(),
 					Pkg:       obj.Pkg().Path(),
@@ -480,4 +581,21 @@ func formatRange(pkg *packages.Package, start token.Pos, end token.Pos) string {
 	return fmt.Sprintf("%s:%d:%d-%d:%d",
 		filename, startPos.Line, startPos.Column,
 		endPos.Line, endPos.Column)
+}
+
+func promotedMethodID(embedder *types.Named, method *types.Func) string {
+	return fmt.Sprintf("(%s.%s).%s",
+		embedder.Obj().Pkg().Path(),
+		embedder.Obj().Name(),
+		method.Name(),
+	)
+}
+
+func embeddedFieldID(embedder *types.Named, fieldIndex int) string {
+	st := embedder.Underlying().(*types.Struct)
+	field := st.Field(fieldIndex)
+	return fmt.Sprintf("(%s).%s",
+		embedder.Obj().Pkg().Path()+"."+embedder.Obj().Name(),
+		field.Name(),
+	)
 }
